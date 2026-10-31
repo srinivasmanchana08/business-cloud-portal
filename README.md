@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Business Cloud Portal
 
 React + Vite frontend, Node/Express API, Supabase PostgreSQL/Auth.
@@ -8,10 +9,10 @@ Designed as a cloud replacement for the supplied business workbook.
 2. Create a Supabase project. In SQL Editor run `database/schema.sql`.
 3. In Supabase Authentication > Providers, enable Email. Create your first user.
 4. In Supabase Project Settings > API, copy Project URL, anon key and service_role key.
-5. Create a Render Web Service. **Root Directory: `server`**, Build command: `npm install`; Start command: `npm start`; Health Check Path: `/health`.
+5. Create a Render Web Service for the `server` folder. Build command: `npm install`; Start command: `npm start`.
 6. Set Render environment variables:
    - `SUPABASE_URL`
-   - `SUPABASE_ANON_KEY` (the public anon key; access is protected by RLS)
+   - `SUPABASE_SERVICE_ROLE_KEY` (secret; NEVER put this in React or GitHub)
    - `CLIENT_ORIGIN` = your GitHub Pages URL
    - `PORT` is supplied by Render.
 7. In `client/.env.production`, set `VITE_API_URL` to the Render API URL ending in `/api`.
@@ -49,8 +50,11 @@ Open the Vite URL printed in the terminal.
 Do not upload the `.xlsm` directly as a public file. First validate and import its rows into the matching tables. Preserve a backup of the original workbook. The current starter app does not automatically import macros, formulas, PivotTables or Power Query logic.
 
 ## 5. Security
-- The API uses the anon key plus each user's JWT, so Row Level Security (see `database/schema.sql`) enforces ownership.
+- Supabase service-role key belongs only in Render environment variables.
 - Users sign in through Supabase Auth; API verifies the access token.
 - Restrict signups in Supabase once your authorized users have been created.
 - Configure database backups and test restore before relying on it for accounting.
 - This starter is a foundation, not a certified accounting or GST system.
+=======
+# business-cloud-portal
+>>>>>>> eb58ec8e97510cf58eb088c1a147adfa30b1e39b
