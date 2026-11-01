@@ -647,3 +647,205 @@ tbody tr:hover {
     padding: 27px
   }
 }
+
+/* ---------- filters & sorting ---------- */
+
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  background: #f7f8fb;
+  border: 1px solid #e9edf4;
+  border-radius: 10px
+}
+
+.filter-bar label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #59667b
+}
+
+.filter-bar select,
+.filter-bar input {
+  border: 1px solid #e1e6ef;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: white;
+  color: #26334a;
+  font-size: 12px;
+  min-width: 140px;
+  outline: none
+}
+
+.filter-bar select:focus,
+.filter-bar input:focus {
+  border-color: #6686ef;
+  box-shadow: 0 0 0 3px #6686ef18
+}
+
+.clear-filters {
+  padding: 9px 12px
+}
+
+.sort-btn {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px
+}
+
+.sort-btn:hover {
+  color: #4268e8
+}
+
+@media(max-width:560px) {
+  .filter-bar {
+    flex-direction: column;
+    align-items: stretch
+  }
+
+  .filter-bar select,
+  .filter-bar input {
+    width: 100%
+  }
+}
+
+
+/* ---------- fixed top header ---------- */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 4
+}
+
+/* ---------- totals bar (stays visible at the bottom of the screen) ---------- */
+
+.totals-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 28px;
+  margin: 16px -22px -22px;
+  padding: 14px 22px;
+  background: #fff;
+  border-top: 2px solid #4268e8;
+  border-radius: 0 0 13px 13px;
+  box-shadow: 0 -6px 16px #192b4812
+}
+
+.totals-label {
+  font: 700 13px Manrope;
+  color: #172033
+}
+
+.totals-label small {
+  display: block;
+  margin-top: 3px;
+  font: 400 11px 'DM Sans', sans-serif;
+  color: #8792a5
+}
+
+.totals-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 32px
+}
+
+.totals-items div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px
+}
+
+.totals-items span {
+  font-size: 11px;
+  color: #8792a5
+}
+
+.totals-items b {
+  font: 800 17px Manrope;
+  color: #172033
+}
+
+@media(max-width:560px) {
+  .totals-bar {
+    padding: 10px 22px
+  }
+
+  .totals-items {
+    gap: 8px 20px
+  }
+
+  .totals-items b {
+    font-size: 14px
+  }
+}
+
+
+/* ---------- company summary ---------- */
+
+th.num,
+td.num {
+  text-align: right
+}
+
+.summary-table tfoot td {
+  font-weight: 800;
+  color: #172033;
+  background: #f7f8fb;
+  border-top: 2px solid #e1e6ef;
+  border-bottom: 0
+}
+
+.due-out {
+  color: #d45c5c;
+  font-weight: 700
+}
+
+.due-in {
+  color: #229b70;
+  font-weight: 700
+}
+
+
+/* ---------- scrollable tables (all pages) ---------- */
+
+.table-wrap {
+  overflow: auto;
+  max-height: calc(100vh - 380px);
+  min-height: 260px;
+  border: 1px solid #eff1f5;
+  border-radius: 10px;
+  scrollbar-width: thin
+}
+
+/* header row stays visible while the rows scroll */
+.table-wrap thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  box-shadow: 0 1px 0 #e9edf4
+}
+
+@media(max-width:900px) {
+  .table-wrap {
+    max-height: calc(100vh - 340px)
+  }
+}

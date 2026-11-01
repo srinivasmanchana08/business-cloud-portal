@@ -1,6 +1,18 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
+import { useDispatch, useSelector } from "react-redux";
+import {
+  fetchStats,
+  fetchList,
+  saveRecord,
+  deleteRecord,
+  setFilter,
+  clearFilters,
+  toggleSort,
+  clearError,
+  clearData,
+} from "./store/dataSlice";
 
 import {
   LayoutDashboard,
@@ -14,7 +26,11 @@ import {
   Search,
   Menu,
   Trash2,
-  Edit3,
+    Edit3,
+    ArrowUp,
+  Scale,
+  ArrowDown,
+  X,
 } from "lucide-react";
 
 // =====================================================
@@ -55,6 +71,7 @@ const nav = [
   ["Purchases", ShoppingCart],
   ["Sales", Receipt],
   ["Payments", Wallet],
+  ["Company Summary", Scale],
 ];
 
 // =====================================================
@@ -68,11 +85,35 @@ const money = (value) =>
     maximumFractionDigits: 2,
   }).format(Number(value || 0));
 
+const qty = (value) =>
+  new Intl.NumberFormat("en-IN", { maximumFractionDigits: 3 }).format(
+    Number(value || 0)
+  );
+
 const today = () => {
   const date = new Date();
   const offset = date.getTimezoneOffset() * 60000;
   return new Date(date.getTime() - offset).toISOString().slice(0, 10);
 };
+
+// Which column each page is sorted/filtered by date on
+const DATE_KEY = {
+  Purchases: "entry_date",
+  Sales: "entry_date",
+  Payments: "payment_date",
+};
+
+const TOTAL_KEY = {
+  Purchases: "purchase_total",
+  Sales: "gross_total",
+};
+
+const SUMMARY = "Company Summary";
+
+const EMPTY_ROWS = [];
+const EMPTY_FILTERS = { company: "", from: "", to: "", direction: "" };
+
+const dayOf = (value) => String(value || "").slice(0, 10);
 
 const getErrorMessage = (error) =>
   error?.message || "Something went wrong. Please try again.";
@@ -87,9 +128,29 @@ export default function App() {
 
   const [page, setPage] = useState("Dashboard");
 
-  const [rows, setRows] = useState([]);
-  const [stats, setStats] = useState(null);
-  const [companies, setCompanies] = useState([]);
+    // ---- Redux (cached data, filters, sort)
+  const dispatch = useDispatch();
+  const stats = useSelector((s) => s.data.stats);
+  const storeError = useSelector((s) => s.data.error);
+  const companies = useSelector((s) => s.data.lists.Companies.items);
+  const list = useSelector((s) => s.data.lists[page]);
+  const filters =
+    useSelector((s) => s.data.filters[page]) || EMPTY_FILTERS;
+  const sortDir =
+    useSelector((s) => s.data.sortDir[page]) || "desc";
+
+  const purchasesList = useSelector((s) => s.data.lists.Purchases);
+  const salesList = useSelector((s) => s.data.lists.Sales);
+  const paymentsList = useSelector((s) => s.data.lists.Payments);
+
+  const rows = list?.items || EMPTY_ROWS;
+  const firstLoad = Boolean(list?.loading && !list?.loaded);
+  const refreshing = Boolean(list?.loading && list?.loaded);
+
+  const summaryParts = [purchasesList, salesList, paymentsList];
+  const summaryLoading = summaryParts.some((l) => l.loading);
+  const summaryFirstLoad = summaryParts.some((l) => l.loading && !l.loaded);
+
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -98,6 +159,11 @@ export default function App() {
   const [modal, setModal] = useState(false);
   const [editing, setEditing] = useState(null);
   const [mobile, setMobile] = useState(false);
+
+  // Company Summary filters
+  const [sCompany, setSCompany] = useState("");
+  const [sFrom, setSFrom] = useState("");
+  const [sTo, setSTo] = useState("");
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -232,61 +298,190 @@ const api = useCallback(
 );
 
   // ===================================================
-  // 9. LOAD DASHBOARD AND DATABASE RECORDS
+  // 9. LOAD DATA (cached in Redux, refreshed in background)
   // ===================================================
 
-  const load = useCallback(async () => {
-    if (!session) return;
+  const refresh = useCallback(
+    (force = false) => {
+      if (!session) return;
 
-    setBusy(true);
-    setError("");
+      dispatch(fetchStats({ api, force }));
+      dispatch(fetchList({ api, page: "Companies", force }));
 
-    try {
-      const [dashboardData, companyData] = await Promise.all([
-        api("dashboard"),
-        api("companies"),
-      ]);
-
-      setStats(dashboardData);
-      setCompanies(companyData);
-
-      if (page !== "Dashboard") {
-        const data = await api(page.toLowerCase());
-        setRows(data);
-      } else {
-        setRows([]);
+      if (page === SUMMARY) {
+        ["Purchases", "Sales", "Payments"].forEach((p) =>
+          dispatch(fetchList({ api, page: p, force }))
+        );
+      } else if (page !== "Dashboard" && page !== "Companies") {
+        dispatch(fetchList({ api, page, force }));
       }
-    } catch (err) {
-      console.error("Data loading error:", err);
-      setError(getErrorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  }, [session, page, api]);
+    },
+    [session, page, api, dispatch]
+  );
 
   useEffect(() => {
     if (session) {
-      load();
+      refresh(false);
     } else {
-      setStats(null);
-      setCompanies([]);
-      setRows([]);
+      dispatch(clearData());
     }
-  }, [session, page, load]);
+  }, [session, page, refresh, dispatch]);
 
   // ===================================================
-  // 10. SEARCH FILTER
+  // 10. FILTER + SORT
   // ===================================================
 
-  const filtered = useMemo(
-    () =>
-      rows.filter((record) =>
-        JSON.stringify(record)
-          .toLowerCase()
-          .includes(search.toLowerCase())
-      ),
-    [rows, search]
+  const companyMap = useMemo(
+    () => Object.fromEntries(companies.map((c) => [c.id, c.name])),
+    [companies]
   );
+
+  const dateKey = DATE_KEY[page];
+  const hasFilters = Boolean(dateKey);
+
+  const activeFilterCount = [
+    filters.company,
+    filters.from,
+    filters.to,
+    filters.direction,
+  ].filter(Boolean).length;
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+
+    let out = rows.filter((record) => {
+      if (
+        q &&
+        !`${JSON.stringify(record)} ${companyMap[record.company_id] || ""}`
+          .toLowerCase()
+          .includes(q)
+      ) {
+        return false;
+      }
+
+      if (!dateKey) return true;
+
+      const day = dayOf(record[dateKey]);
+
+      if (filters.company && record.company_id !== filters.company) return false;
+      if (filters.from && day < filters.from) return false;
+      if (filters.to && day > filters.to) return false;
+      if (
+        page === "Payments" &&
+        filters.direction &&
+        record.direction !== filters.direction
+      ) {
+        return false;
+      }
+
+      return true;
+    });
+
+    if (dateKey) {
+      const dir = sortDir === "asc" ? 1 : -1;
+
+      out = [...out].sort((a, b) => {
+        const byDate = dayOf(a[dateKey]).localeCompare(dayOf(b[dateKey]));
+        if (byDate) return byDate * dir;
+
+        // same date: newest entry first (or last when ascending)
+        return (
+          String(a.created_at || a.id).localeCompare(
+            String(b.created_at || b.id)
+          ) * dir
+        );
+      });
+    }
+
+    return out;
+  }, [rows, search, filters, sortDir, dateKey, page, companyMap]);
+
+  // Totals follow the active filters and search
+  const totals = useMemo(() => {
+    const t = { quantity: 0, amount: 0, received: 0, paid: 0 };
+
+    filtered.forEach((r) => {
+      if (page === "Payments") {
+        const amount = Number(r.amount || 0);
+        if (r.direction === "received") t.received += amount;
+        if (r.direction === "paid") t.paid += amount;
+      } else if (TOTAL_KEY[page]) {
+        t.quantity += Number(r.quantity || 0);
+        t.amount += Number(r[TOTAL_KEY[page]] || 0);
+      }
+    });
+
+    return t;
+  }, [filtered, page]);
+
+  // ===================================================
+  // 10b. COMPANY SUMMARY (purchases, sales, payments, dues)
+  // ===================================================
+
+  const summary = useMemo(() => {
+    const inRange = (value) => {
+      const day = dayOf(value);
+      return (!sFrom || day >= sFrom) && (!sTo || day <= sTo);
+    };
+
+    const byCompany = {};
+
+    const entry = (id) => {
+      if (!byCompany[id]) {
+        byCompany[id] = {
+          id,
+          name: companyMap[id] || "Unknown company",
+          pQty: 0, pTotal: 0, paid: 0,
+          sQty: 0, sTotal: 0, received: 0,
+        };
+      }
+      return byCompany[id];
+    };
+
+    purchasesList.items.forEach((r) => {
+      if (!inRange(r.entry_date)) return;
+      const c = entry(r.company_id);
+      c.pQty += Number(r.quantity || 0);
+      c.pTotal += Number(r.purchase_total || 0);
+    });
+
+    salesList.items.forEach((r) => {
+      if (!inRange(r.entry_date)) return;
+      const c = entry(r.company_id);
+      c.sQty += Number(r.quantity || 0);
+      c.sTotal += Number(r.gross_total || 0);
+    });
+
+    paymentsList.items.forEach((r) => {
+      if (!inRange(r.payment_date)) return;
+      const c = entry(r.company_id);
+      if (r.direction === "paid") c.paid += Number(r.amount || 0);
+      if (r.direction === "received") c.received += Number(r.amount || 0);
+    });
+
+    const q = search.trim().toLowerCase();
+
+    const out = Object.values(byCompany)
+      .filter((c) => !sCompany || c.id === sCompany)
+      .filter((c) => !q || c.name.toLowerCase().includes(q))
+      .map((c) => {
+        const payable = c.pTotal - c.paid;
+        const receivable = c.sTotal - c.received;
+        return { ...c, payable, receivable, net: receivable - payable };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    const sum = (key) => out.reduce((n, c) => n + c[key], 0);
+
+    return {
+      rows: out,
+      totals: {
+        pQty: sum("pQty"), pTotal: sum("pTotal"), paid: sum("paid"),
+        sQty: sum("sQty"), sTotal: sum("sTotal"), received: sum("received"),
+        payable: sum("payable"), receivable: sum("receivable"), net: sum("net"),
+      },
+    };
+  }, [purchasesList, salesList, paymentsList, companyMap, sCompany, sFrom, sTo, search]);
 
   // ===================================================
   // 11. LOGIN
@@ -347,7 +542,7 @@ const api = useCallback(
       ["voucher_no", "Voucher no.", "text"],
       ["vehicle_number", "Vehicle number", "text"],
       ["particulars", "Particulars", "text"],
-      ["quantity", "Quantity", "number"],
+      ["quantity", "Quantity (qtl)", "number"],
       ["rate", "Rate", "number"],
       ["purchase_total", "Purchase total (₹)", "number"],
       ["seller", "Seller", "text"],
@@ -359,11 +554,11 @@ const api = useCallback(
       ["entry_date", "Date", "date", true],
       ["voucher_no", "Voucher no.", "text"],
       ["vehicle_number", "Vehicle number", "text"],
-      ["quantity", "Quantity", "number"],
+      ["quantity", "Quantity (qtl)", "number"],
       ["rate", "Rate", "number"],
       ["gross_total", "Gross total (₹)", "number"],
       ["unload_date", "Unload date", "date"],
-      ["unload_quantity", "Unload quantity", "number"],
+      ["unload_quantity", "Unload quantity (qtl)", "number"],
       ["payment_due_date", "Payment due date", "date"],
       ["purchase_reference", "Purchase reference", "text"],
       ["notes", "Notes", "text"],
@@ -420,6 +615,7 @@ const api = useCallback(
   };
 
   const titleMap = {
+    quantity: "Quantity (qtl)",
     company_id: "Company",
     entry_date: "Date",
     payment_date: "Date",
@@ -435,13 +631,17 @@ const api = useCallback(
 
   function display(key, value) {
     if (key === "company_id") {
-      return companies.find((company) => company.id === value)?.name || "—";
+      return companyMap[value] || "—";
     }
 
     if (
       ["gross_total", "purchase_total", "amount"].includes(key)
     ) {
       return money(value);
+    }
+
+    if (key === "quantity" || key === "unload_quantity") {
+      return value == null || value === "" ? "—" : `${qty(value)} qtl`;
     }
 
     return value ?? "—";
@@ -500,19 +700,12 @@ const api = useCallback(
         }
       });
 
-      const endpoint = `${page.toLowerCase()}${
-        editing ? `/${editing.id}` : ""
-      }`;
-
-      await api(endpoint, {
-        method: editing ? "PUT" : "POST",
-        body: JSON.stringify(body),
-      });
+            await dispatch(
+        saveRecord({ api, page, id: editing?.id, body })
+      ).unwrap();
 
       setModal(false);
       setEditing(null);
-
-      await load();
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -533,11 +726,7 @@ const api = useCallback(
     setBusy(true);
 
     try {
-      await api(`${page.toLowerCase()}/${id}`, {
-        method: "DELETE",
-      });
-
-      await load();
+            await dispatch(deleteRecord({ api, page, id })).unwrap();
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -648,6 +837,7 @@ const api = useCallback(
             onClick={() => {
               setPage(name);
               setSearch("");
+              dispatch(clearError());
               setMobile(false);
             }}
           >
@@ -703,9 +893,9 @@ const api = useCallback(
 
             <button
               className="icon-btn"
-              onClick={load}
+              onClick={() => refresh(true)}
               title="Refresh"
-              disabled={busy}
+              disabled={busy || Boolean(list?.loading) || summaryLoading}
             >
               <RefreshCw size={17} />
             </button>
@@ -727,11 +917,13 @@ const api = useCallback(
               <p className="muted">
                 {page === "Dashboard"
                   ? "Monitor sales, purchases and cash flow in one place."
+                  : page === SUMMARY
+                  ? "Purchases, sales, payments and outstanding dues for every company."
                   : `Manage and update your ${page.toLowerCase()} records.`}
               </p>
             </div>
 
-            {page !== "Dashboard" && (
+            {page !== "Dashboard" && page !== SUMMARY && (
               <button
                 className="primary"
                 onClick={() => {
@@ -749,9 +941,9 @@ const api = useCallback(
 
           {/* ERROR MESSAGE */}
 
-          {error && (
+          {(error || storeError) && (
             <div className="error">
-              {error}
+              {error || storeError}
             </div>
           )}
 
@@ -814,9 +1006,193 @@ const api = useCallback(
               </div>
             </>
 
-          ) : (
+          ) : page === SUMMARY ? (
 
-            /* DATA TABLE */
+            /* COMPANY SUMMARY */
+
+            <div className="panel">
+
+              <div className="table-toolbar">
+
+                <div>
+                  <h3>Company summary</h3>
+
+                  <p className="muted">
+                    {summary.rows.length} companies · purchases, sales, payments and dues
+                    {summaryLoading && !summaryFirstLoad && " · refreshing…"}
+                  </p>
+                </div>
+
+                <div className="searchbox">
+                  <Search size={16} />
+
+                  <input
+                    placeholder="Search company..."
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                  />
+                </div>
+
+              </div>
+
+              <div className="filter-bar">
+
+                <label>
+                  Company
+                  <select
+                    value={sCompany}
+                    onChange={(e) => setSCompany(e.target.value)}
+                  >
+                    <option value="">All companies</option>
+                    {companies.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  From
+                  <input
+                    type="date"
+                    value={sFrom}
+                    max={sTo || undefined}
+                    onChange={(e) => setSFrom(e.target.value)}
+                  />
+                </label>
+
+                <label>
+                  To
+                  <input
+                    type="date"
+                    value={sTo}
+                    min={sFrom || undefined}
+                    onChange={(e) => setSTo(e.target.value)}
+                  />
+                </label>
+
+                {(sCompany || sFrom || sTo) && (
+                  <button
+                    type="button"
+                    className="secondary clear-filters"
+                    onClick={() => {
+                      setSCompany("");
+                      setSFrom("");
+                      setSTo("");
+                    }}
+                  >
+                    <X size={14} />
+                    Clear filters
+                  </button>
+                )}
+
+              </div>
+
+              {summaryFirstLoad ? (
+
+                <p className="muted pad">Loading records...</p>
+
+              ) : (
+
+                <div className="table-wrap">
+
+                  <table className="summary-table">
+
+                    <thead>
+                      <tr>
+                        <th>Company</th>
+                        <th className="num">Purchase qty (qtl)</th>
+                        <th className="num">Purchase total</th>
+                        <th className="num">Paid</th>
+                        <th className="num">Payable due</th>
+                        <th className="num">Sales qty (qtl)</th>
+                        <th className="num">Sales total</th>
+                        <th className="num">Received</th>
+                        <th className="num">Receivable due</th>
+                        <th className="num">Net balance</th>
+                      </tr>
+                    </thead>
+
+                    <tbody>
+                      {summary.rows.map((c) => (
+                        <tr key={c.id}>
+                          <td><b>{c.name}</b></td>
+                          <td className="num">{qty(c.pQty)}</td>
+                          <td className="num">{money(c.pTotal)}</td>
+                          <td className="num">{money(c.paid)}</td>
+                          <td className={`num ${c.payable > 0 ? "due-out" : ""}`}>{money(c.payable)}</td>
+                          <td className="num">{qty(c.sQty)}</td>
+                          <td className="num">{money(c.sTotal)}</td>
+                          <td className="num">{money(c.received)}</td>
+                          <td className={`num ${c.receivable > 0 ? "due-in" : ""}`}>{money(c.receivable)}</td>
+                          <td className={`num ${c.net > 0 ? "due-in" : c.net < 0 ? "due-out" : ""}`}>{money(c.net)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+
+                    {summary.rows.length > 0 && (
+                      <tfoot>
+                        <tr>
+                          <td>Total</td>
+                          <td className="num">{qty(summary.totals.pQty)}</td>
+                          <td className="num">{money(summary.totals.pTotal)}</td>
+                          <td className="num">{money(summary.totals.paid)}</td>
+                          <td className="num">{money(summary.totals.payable)}</td>
+                          <td className="num">{qty(summary.totals.sQty)}</td>
+                          <td className="num">{money(summary.totals.sTotal)}</td>
+                          <td className="num">{money(summary.totals.received)}</td>
+                          <td className="num">{money(summary.totals.receivable)}</td>
+                          <td className="num">{money(summary.totals.net)}</td>
+                        </tr>
+                      </tfoot>
+                    )}
+
+                  </table>
+
+                  {!summary.rows.length && (
+                    <p className="muted pad">No records found.</p>
+                  )}
+
+                </div>
+
+              )}
+
+              {!summaryFirstLoad && (
+                <div className="totals-bar">
+
+                  <div className="totals-label">
+                    {sCompany || sFrom || sTo || search ? "Filtered totals" : "Totals"}
+                    <small>{summary.rows.length} companies</small>
+                  </div>
+
+                  <div className="totals-items">
+                    <div>
+                      <span>Purchase qty (qtl)</span>
+                      <b>{qty(summary.totals.pQty)}</b>
+                    </div>
+                    <div>
+                      <span>Sales qty (qtl)</span>
+                      <b>{qty(summary.totals.sQty)}</b>
+                    </div>
+                    <div>
+                      <span>Payable due</span>
+                      <b>{money(summary.totals.payable)}</b>
+                    </div>
+                    <div>
+                      <span>Receivable due</span>
+                      <b>{money(summary.totals.receivable)}</b>
+                    </div>
+                    <div>
+                      <span>Net (receivable − payable)</span>
+                      <b>{money(summary.totals.net)}</b>
+                    </div>
+                  </div>
+
+                </div>
+              )}
+
+            </div>
+
+          ) : ( /* DATA TABLE */
 
             <div className="panel">
 
@@ -826,7 +1202,14 @@ const api = useCallback(
                   <h3>{page} register</h3>
 
                   <p className="muted">
-                    {filtered.length} records shown · latest 500
+                    {filtered.length} of {rows.length} records
+                    {hasFilters && sortDir === "desc"
+                      ? " · newest first"
+                      : hasFilters
+                      ? " · oldest first"
+                      : ""}
+                    
+                    {refreshing && " · refreshing…"}
                   </p>
                 </div>
 
@@ -842,7 +1225,79 @@ const api = useCallback(
 
               </div>
 
-              {busy ? (
+              {hasFilters && (
+                <div className="filter-bar">
+
+                  <label>
+                    Company
+                    <select
+                      value={filters.company}
+                      onChange={(e) =>
+                        dispatch(setFilter({ page, key: "company", value: e.target.value }))
+                      }
+                    >
+                      <option value="">All companies</option>
+                      {companies.map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    From
+                    <input
+                      type="date"
+                      value={filters.from}
+                      max={filters.to || undefined}
+                      onChange={(e) =>
+                        dispatch(setFilter({ page, key: "from", value: e.target.value }))
+                      }
+                    />
+                  </label>
+
+                  <label>
+                    To
+                    <input
+                      type="date"
+                      value={filters.to}
+                      min={filters.from || undefined}
+                      onChange={(e) =>
+                        dispatch(setFilter({ page, key: "to", value: e.target.value }))
+                      }
+                    />
+                  </label>
+
+                  {page === "Payments" && (
+                    <label>
+                      Direction
+                      <select
+                        value={filters.direction}
+                        onChange={(e) =>
+                          dispatch(setFilter({ page, key: "direction", value: e.target.value }))
+                        }
+                      >
+                        <option value="">All</option>
+                        <option value="received">Received</option>
+                        <option value="paid">Paid</option>
+                      </select>
+                    </label>
+                  )}
+
+                  {activeFilterCount > 0 && (
+                    <button
+                      type="button"
+                      className="secondary clear-filters"
+                      onClick={() => dispatch(clearFilters(page))}
+                    >
+                      <X size={14} />
+                      Clear filters ({activeFilterCount})
+                    </button>
+                  )}
+
+                </div>
+              )}
+
+              {firstLoad ? (
 
                 <p className="muted pad">
                   Loading records...
@@ -859,7 +1314,19 @@ const api = useCallback(
 
                         {columns[page].map((key) => (
                           <th key={key}>
-                            {titleMap[key] || key.replaceAll("_", " ")}
+                            {key === dateKey ? (
+                              <button
+                                type="button"
+                                className="sort-btn"
+                                onClick={() => dispatch(toggleSort(page))}
+                                title={sortDir === "desc" ? "Newest first — click for oldest first" : "Oldest first — click for newest first"}
+                              >
+                                {titleMap[key] || key}
+                                {sortDir === "desc" ? <ArrowDown size={13} /> : <ArrowUp size={13} />}
+                              </button>
+                            ) : (
+                              titleMap[key] || key.replaceAll("_", " ")
+                            )}
                           </th>
                         ))}
 
@@ -916,12 +1383,55 @@ const api = useCallback(
 
                   {!filtered.length && (
                     <p className="muted pad">
-                      No records found.
+                      {rows.length && activeFilterCount ? "No records match these filters." : "No records found."}
                     </p>
                   )}
 
                 </div>
 
+              )}
+
+              {hasFilters && !firstLoad && (
+                <div className="totals-bar">
+
+                  <div className="totals-label">
+                    {activeFilterCount > 0 || search ? "Filtered totals" : "Totals"}
+                    <small>{filtered.length} records</small>
+                  </div>
+
+                  <div className="totals-items">
+
+                    {page === "Payments" ? (
+                      <>
+                        <div>
+                          <span>Received</span>
+                          <b>{money(totals.received)}</b>
+                        </div>
+                        <div>
+                          <span>Paid</span>
+                          <b>{money(totals.paid)}</b>
+                        </div>
+                        <div>
+                          <span>Net</span>
+                          <b>{money(totals.received - totals.paid)}</b>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div>
+                          <span>Total quantity (qtl)</span>
+                          <b>{qty(totals.quantity)} qtl</b>
+                        </div>
+                        <div>
+                          <span>{page === "Sales" ? "Total sales" : "Total purchases"}</span>
+                          <b>{money(totals.amount)}</b>
+                        </div>
+                      </>
+                    )}
+
+                  </div>
+
+                </div>
               )}
 
             </div>
