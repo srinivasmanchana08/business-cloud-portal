@@ -743,7 +743,7 @@ tbody tr:hover {
   flex-wrap: wrap;
   gap: 12px 28px;
   margin: 16px -22px -22px;
-  padding: 14px 22px;
+  padding: 5px 10px;
   background: #fff;
   border-top: 2px solid #4268e8;
   border-radius: 0 0 13px 13px;
@@ -829,7 +829,7 @@ td.num {
 
 .table-wrap {
   overflow: auto;
-  max-height: calc(100vh - 380px);
+  max-height: calc(100vh - 290px);
   min-height: 260px;
   border: 1px solid #eff1f5;
   border-radius: 10px;
@@ -846,6 +846,50 @@ td.num {
 
 @media(max-width:900px) {
   .table-wrap {
-    max-height: calc(100vh - 340px)
+    max-height: calc(100vh - 250px)
   }
+}
+
+
+/* ---------- header action button ---------- */
+
+.topbar .primary {
+  padding: 9px 15px
+}
+
+.content {
+  padding-top: 24px
+}
+
+@media(max-width:560px) {
+  .topbar .primary {
+    padding: 8px 10px;
+    font-size: 11px
+  }
+}
+
+
+/* ---------- vehicle tracking ---------- */
+
+.status-pill {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 700
+}
+
+.status-pill.sold {
+  background: #e5f7ef;
+  color: #229b70
+}
+
+.status-pill.pending {
+  background: #fff4df;
+  color: #c38b2b
+}
+
+.status-pill.orphan {
+  background: #ffebeb;
+  color: #d45c5c
 }

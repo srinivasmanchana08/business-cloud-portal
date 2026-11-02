@@ -28,7 +28,8 @@ import {
   Trash2,
     Edit3,
     ArrowUp,
-  Scale,
+    Scale,
+  Truck,
   ArrowDown,
   X,
 } from "lucide-react";
@@ -72,6 +73,7 @@ const nav = [
   ["Sales", Receipt],
   ["Payments", Wallet],
   ["Company Summary", Scale],
+  ["Vehicle Tracking", Truck],
 ];
 
 // =====================================================
@@ -109,6 +111,13 @@ const TOTAL_KEY = {
 };
 
 const SUMMARY = "Company Summary";
+const TRACK = "Vehicle Tracking";
+
+// vehicle numbers compared without spaces / dashes / case
+const normVehicle = (v) => String(v || "").replace(/[\s-]/g, "").toUpperCase();
+
+const daysBetween = (from, to) =>
+  Math.round((Date.parse(dayOf(to)) - Date.parse(dayOf(from))) / 86400000);
 
 const EMPTY_ROWS = [];
 const EMPTY_FILTERS = { company: "", from: "", to: "", direction: "" };
@@ -127,6 +136,9 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
 
   const [page, setPage] = useState("Dashboard");
+
+  // the Vehicle Tracking page adds Purchase records
+  const dataPage = page === TRACK ? "Purchases" : page;
 
     // ---- Redux (cached data, filters, sort)
   const dispatch = useDispatch();
@@ -164,6 +176,14 @@ export default function App() {
   const [sCompany, setSCompany] = useState("");
   const [sFrom, setSFrom] = useState("");
   const [sTo, setSTo] = useState("");
+
+  // Vehicle Tracking filters
+  const [tPCompany, setTPCompany] = useState("");
+  const [tSCompany, setTSCompany] = useState("");
+  const [tFrom, setTFrom] = useState("");
+  const [tTo, setTTo] = useState("");
+  const [tStatus, setTStatus] = useState("");
+  const [tDesc, setTDesc] = useState(true);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -308,7 +328,11 @@ const api = useCallback(
       dispatch(fetchStats({ api, force }));
       dispatch(fetchList({ api, page: "Companies", force }));
 
-      if (page === SUMMARY) {
+      if (page === TRACK) {
+        ["Purchases", "Sales"].forEach((p) =>
+          dispatch(fetchList({ api, page: p, force }))
+        );
+      } else if (page === SUMMARY) {
         ["Purchases", "Sales", "Payments"].forEach((p) =>
           dispatch(fetchList({ api, page: p, force }))
         );
@@ -482,6 +506,144 @@ const api = useCallback(
       },
     };
   }, [purchasesList, salesList, paymentsList, companyMap, sCompany, sFrom, sTo, search]);
+
+  // ===================================================
+  // 10c. VEHICLE TRACKING (purchase → sale, matched by vehicle)
+  // ===================================================
+
+  const tracking = useMemo(() => {
+    const purchases = purchasesList.items.map((p) => ({ ...p, _sales: [] }));
+
+    const sales = [...salesList.items].sort((a, b) =>
+      dayOf(a.entry_date).localeCompare(dayOf(b.entry_date))
+    );
+
+    const byVoucher = {};
+    const byVehicle = {};
+
+    purchases.forEach((p) => {
+      const v = normVehicle(p.voucher_no);
+      if (v) byVoucher[v] = p;
+
+      const k = normVehicle(p.vehicle_number);
+      if (k) (byVehicle[k] = byVehicle[k] || []).push(p);
+    });
+
+    const orphans = [];
+
+    sales.forEach((s) => {
+      // 1) explicit "purchase reference" on the sale (voucher number)
+      let match = byVoucher[normVehicle(s.purchase_reference)];
+
+      // 2) same vehicle, latest purchase on or before the sale date
+      if (!match) {
+        const candidates = (byVehicle[normVehicle(s.vehicle_number)] || [])
+          .filter((p) => dayOf(p.entry_date) <= dayOf(s.entry_date))
+          .sort((a, b) => dayOf(b.entry_date).localeCompare(dayOf(a.entry_date)));
+
+        match = candidates.find((p) => !p._sales.length) || candidates[0];
+      }
+
+      if (match) match._sales.push(s);
+      else orphans.push(s);
+    });
+
+    const all = [];
+
+    purchases.forEach((p) => {
+      if (!p._sales.length) {
+        all.push({ key: `p-${p.id}`, status: "Pending", p, s: null });
+      } else {
+        p._sales.forEach((s) =>
+          all.push({
+            key: `p-${p.id}-${s.id}`,
+            status: "Sold",
+            p,
+            s,
+            single: p._sales.length === 1,
+          })
+        );
+      }
+    });
+
+    orphans.forEach((s) =>
+      all.push({ key: `s-${s.id}`, status: "No purchase", p: null, s })
+    );
+
+    const q = search.trim().toLowerCase();
+
+    const rowsOut = all
+      .filter((r) => {
+        const date = dayOf((r.p || r.s).entry_date);
+
+        if (tPCompany && r.p?.company_id !== tPCompany) return false;
+        if (tSCompany && r.s?.company_id !== tSCompany) return false;
+        if (tFrom && date < tFrom) return false;
+        if (tTo && date > tTo) return false;
+        if (tStatus && r.status !== tStatus) return false;
+
+        if (q) {
+          const text = [
+            r.p?.vehicle_number,
+            r.s?.vehicle_number,
+            r.p?.voucher_no,
+            r.s?.voucher_no,
+            companyMap[r.p?.company_id],
+            companyMap[r.s?.company_id],
+          ]
+            .join(" ")
+            .toLowerCase();
+
+          if (!text.includes(q)) return false;
+        }
+
+        return true;
+      })
+      .map((r) => ({
+        ...r,
+        days: r.p && r.s ? daysBetween(r.p.entry_date, r.s.entry_date) : null,
+        margin:
+          r.p && r.s && r.single
+            ? Number(r.s.gross_total || 0) - Number(r.p.purchase_total || 0)
+            : null,
+      }))
+      .sort((a, b) => {
+        const da = dayOf((a.p || a.s).entry_date);
+        const db = dayOf((b.p || b.s).entry_date);
+        return da.localeCompare(db) * (tDesc ? -1 : 1);
+      });
+
+    // totals: each purchase counted once even if sold in several parts
+    const seen = new Set();
+    const totals = { pQty: 0, pTotal: 0, sQty: 0, sTotal: 0, soldPurchase: 0, pending: 0 };
+
+    rowsOut.forEach((r) => {
+      if (r.p && !seen.has(r.p.id)) {
+        seen.add(r.p.id);
+        totals.pQty += Number(r.p.quantity || 0);
+        totals.pTotal += Number(r.p.purchase_total || 0);
+        if (r.status === "Sold") totals.soldPurchase += Number(r.p.purchase_total || 0);
+      }
+
+      if (r.s) {
+        totals.sQty += Number(r.s.quantity || 0);
+        totals.sTotal += Number(r.s.gross_total || 0);
+      }
+
+      if (r.status === "Pending") totals.pending += 1;
+    });
+
+    totals.margin = totals.sTotal - totals.soldPurchase;
+
+    return { rows: rowsOut, totals };
+  }, [
+    purchasesList, salesList, companyMap,
+    tPCompany, tSCompany, tFrom, tTo, tStatus, tDesc, search,
+  ]);
+
+  const trackFiltered = Boolean(
+    tPCompany || tSCompany || tFrom || tTo || tStatus || search
+  );
 
   // ===================================================
   // 11. LOGIN
@@ -701,7 +863,7 @@ const api = useCallback(
       });
 
             await dispatch(
-        saveRecord({ api, page, id: editing?.id, body })
+        saveRecord({ api, page: dataPage, id: editing?.id, body })
       ).unwrap();
 
       setModal(false);
@@ -889,6 +1051,20 @@ const api = useCallback(
 
           <div className="top-actions">
 
+            {page !== "Dashboard" && page !== SUMMARY && (
+              <button
+                className="primary"
+                onClick={() => {
+                  setEditing(null);
+                  setError("");
+                  setModal(true);
+                }}
+              >
+                <Plus size={16} />
+                Add {dataPage.slice(0, -1)}
+              </button>
+            )}
+
             <span className="live-dot">● Connected</span>
 
             <button
@@ -906,38 +1082,6 @@ const api = useCallback(
         {/* PAGE CONTENT */}
 
         <section className="content">
-
-          <div className="page-heading">
-
-            <div>
-              <p className="eyebrow">BUSINESS OVERVIEW</p>
-
-              <h1>{page}</h1>
-
-              <p className="muted">
-                {page === "Dashboard"
-                  ? "Monitor sales, purchases and cash flow in one place."
-                  : page === SUMMARY
-                  ? "Purchases, sales, payments and outstanding dues for every company."
-                  : `Manage and update your ${page.toLowerCase()} records.`}
-              </p>
-            </div>
-
-            {page !== "Dashboard" && page !== SUMMARY && (
-              <button
-                className="primary"
-                onClick={() => {
-                  setEditing(null);
-                  setError("");
-                  setModal(true);
-                }}
-              >
-                <Plus size={17} />
-                Add {page.slice(0, -1)}
-              </button>
-            )}
-
-          </div>
 
           {/* ERROR MESSAGE */}
 
@@ -1005,6 +1149,227 @@ const api = useCallback(
 
               </div>
             </>
+
+          ) : page === TRACK ? (
+
+            /* VEHICLE TRACKING */
+
+            <div className="panel">
+
+              <div className="table-toolbar">
+
+                <div>
+                  <h3>Vehicle tracking</h3>
+
+                  <p className="muted">
+                    {trackFiltered
+                      ? `${tracking.rows.length} records (filtered)`
+                      : `${tracking.rows.length} records`}
+                    {" · purchase company → sale company, matched by vehicle"}
+                    {summaryLoading && !summaryFirstLoad && " · refreshing…"}
+                  </p>
+                </div>
+
+                <div className="searchbox">
+                  <Search size={16} />
+
+                  <input
+                    placeholder="Search vehicle / voucher..."
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                  />
+                </div>
+
+              </div>
+
+              <div className="filter-bar">
+
+                <label>
+                  Purchase company
+                  <select
+                    value={tPCompany}
+                    onChange={(e) => setTPCompany(e.target.value)}
+                  >
+                    <option value="">All companies</option>
+                    {companies.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  Sale company
+                  <select
+                    value={tSCompany}
+                    onChange={(e) => setTSCompany(e.target.value)}
+                  >
+                    <option value="">All companies</option>
+                    {companies.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  From
+                  <input
+                    type="date"
+                    value={tFrom}
+                    max={tTo || undefined}
+                    onChange={(e) => setTFrom(e.target.value)}
+                  />
+                </label>
+
+                <label>
+                  To
+                  <input
+                    type="date"
+                    value={tTo}
+                    min={tFrom || undefined}
+                    onChange={(e) => setTTo(e.target.value)}
+                  />
+                </label>
+
+                <label>
+                  Status
+                  <select
+                    value={tStatus}
+                    onChange={(e) => setTStatus(e.target.value)}
+                  >
+                    <option value="">All</option>
+                    <option value="Sold">Sold</option>
+                    <option value="Pending">Pending (not sold)</option>
+                    <option value="No purchase">Sale without purchase</option>
+                  </select>
+                </label>
+
+                {trackFiltered && (
+                  <button
+                    type="button"
+                    className="secondary clear-filters"
+                    onClick={() => {
+                      setTPCompany("");
+                      setTSCompany("");
+                      setTFrom("");
+                      setTTo("");
+                      setTStatus("");
+                      setSearch("");
+                    }}
+                  >
+                    <X size={14} />
+                    Clear filters
+                  </button>
+                )}
+
+              </div>
+
+              {summaryFirstLoad ? (
+
+                <p className="muted pad">Loading records...</p>
+
+              ) : (
+
+                <div className="table-wrap">
+
+                  <table className="summary-table">
+
+                    <thead>
+                      <tr>
+                        <th>Vehicle</th>
+                        <th>Purchase company</th>
+                        <th>
+                          <button
+                            type="button"
+                            className="sort-btn"
+                            onClick={() => setTDesc(!tDesc)}
+                            title={tDesc ? "Newest first — click for oldest first" : "Oldest first — click for newest first"}
+                          >
+                            Purchase date
+                            {tDesc ? <ArrowDown size={13} /> : <ArrowUp size={13} />}
+                          </button>
+                        </th>
+                        <th className="num">Qty (qtl)</th>
+                        <th className="num">Purchase total</th>
+                        <th>Sale company</th>
+                        <th>Sale date</th>
+                        <th className="num">Qty (qtl)</th>
+                        <th className="num">Sale total</th>
+                        <th className="num">Days</th>
+                        <th className="num">Margin</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+
+                    <tbody>
+                      {tracking.rows.map((r) => (
+                        <tr key={r.key}>
+                          <td><b>{r.p?.vehicle_number || r.s?.vehicle_number || "—"}</b></td>
+                          <td>{r.p ? companyMap[r.p.company_id] || "—" : "—"}</td>
+                          <td>{r.p ? dayOf(r.p.entry_date) : "—"}</td>
+                          <td className="num">{r.p ? qty(r.p.quantity) : "—"}</td>
+                          <td className="num">{r.p ? money(r.p.purchase_total) : "—"}</td>
+                          <td>{r.s ? companyMap[r.s.company_id] || "—" : "—"}</td>
+                          <td>{r.s ? dayOf(r.s.entry_date) : "—"}</td>
+                          <td className="num">{r.s ? qty(r.s.quantity) : "—"}</td>
+                          <td className="num">{r.s ? money(r.s.gross_total) : "—"}</td>
+                          <td className="num">{r.days ?? "—"}</td>
+                          <td className={`num ${r.margin > 0 ? "due-in" : r.margin < 0 ? "due-out" : ""}`}>
+                            {r.margin === null ? "—" : money(r.margin)}
+                          </td>
+                          <td>
+                            <span className={`status-pill ${r.status === "Sold" ? "sold" : r.status === "Pending" ? "pending" : "orphan"}`}>
+                              {r.status === "No purchase" ? "No purchase found" : r.status}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+
+                  </table>
+
+                  {!tracking.rows.length && (
+                    <p className="muted pad">No records found.</p>
+                  )}
+
+                </div>
+
+              )}
+
+              {!summaryFirstLoad && (
+                <div className="totals-bar">
+
+                  <div className="totals-label">
+                    {trackFiltered ? "Filtered totals" : "Totals"}
+                    <small>{tracking.rows.length} records · {tracking.totals.pending} pending</small>
+                  </div>
+
+                  <div className="totals-items">
+                    <div>
+                      <span>Purchase qty (qtl)</span>
+                      <b>{qty(tracking.totals.pQty)}</b>
+                    </div>
+                    <div>
+                      <span>Purchase total</span>
+                      <b>{money(tracking.totals.pTotal)}</b>
+                    </div>
+                    <div>
+                      <span>Sale qty (qtl)</span>
+                      <b>{qty(tracking.totals.sQty)}</b>
+                    </div>
+                    <div>
+                      <span>Sale total</span>
+                      <b>{money(tracking.totals.sTotal)}</b>
+                    </div>
+                    <div>
+                      <span>Margin (sold)</span>
+                      <b>{money(tracking.totals.margin)}</b>
+                    </div>
+                  </div>
+
+                </div>
+              )}
+
+            </div>
 
           ) : page === SUMMARY ? (
 
@@ -1463,7 +1828,7 @@ const api = useCallback(
                 <p className="eyebrow">RECORD MANAGEMENT</p>
 
                 <h2>
-                  {editing ? "Edit" : "Add"} {page.slice(0, -1)}
+                  {editing ? "Edit" : "Add"} {dataPage.slice(0, -1)}
                 </h2>
               </div>
 
@@ -1479,7 +1844,7 @@ const api = useCallback(
 
             <div className="form-grid">
 
-              {fields[page].map(
+              {fields[dataPage].map(
                 ([key, label, type, required]) => (
 
                   <label
