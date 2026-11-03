@@ -885,3 +885,190 @@ td.num {
   background: #ffebeb;
   color: #d45c5c
 }
+
+
+/* ---------- search in top header ---------- */
+
+.top-search {
+  flex: 1;
+  max-width: 420px;
+  margin: 0 20px;
+  padding: 7px 11px
+}
+
+.top-search input {
+  width: 100%;
+  min-width: 0
+}
+
+/* ---------- filters on a single line (more room for the table) ---------- */
+
+.filter-bar {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 10px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  scrollbar-width: thin
+}
+
+.filter-bar label {
+  flex: 0 0 auto;
+  gap: 3px;
+  font-size: 10px
+}
+
+.filter-bar select,
+.filter-bar input {
+  min-width: 120px;
+  padding: 6px 9px
+}
+
+.filter-bar .clear-filters {
+  flex: 0 0 auto;
+  padding: 7px 11px;
+  white-space: nowrap
+}
+
+.table-toolbar {
+  margin-bottom: 10px
+}
+
+/* keep the table-height calc in step with the slimmer toolbar */
+.table-wrap {
+  max-height: calc(100vh - 250px)
+}
+
+@media(max-width:900px) {
+  .table-wrap {
+    max-height: calc(100vh - 220px)
+  }
+}
+
+@media(max-width:560px) {
+  .topbar {
+    height: auto;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 14px
+  }
+
+  .top-search {
+    order: 3;
+    flex: 1 0 100%;
+    max-width: none;
+    margin: 0
+  }
+
+  /* override the earlier stacked layout: stay on one line, scroll sideways */
+  .filter-bar {
+    flex-direction: row;
+    align-items: flex-end
+  }
+
+  .filter-bar select,
+  .filter-bar input {
+    width: auto
+  }
+}
+
+
+/* ---------- register: title, records and filters on one line ---------- */
+
+.table-toolbar {
+  flex-wrap: nowrap
+}
+
+.table-toolbar > div:first-child {
+  flex: 0 0 auto;
+  white-space: nowrap
+}
+
+.table-toolbar .filter-bar {
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-end;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 0
+}
+
+@media(max-width:900px) {
+  .table-toolbar {
+    align-items: flex-start;
+    flex-direction: column
+  }
+
+  .table-toolbar .filter-bar {
+    width: 100%;
+    justify-content: flex-start
+  }
+}
+
+
+/* ---------- full-height register: table fills the screen, totals sit flush below ---------- */
+
+.content {
+  padding-bottom: 10px
+}
+
+.panel.fill {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 68px - 20px);
+  min-height: 420px;
+  margin-bottom: 0;
+  padding: 16px 18px
+}
+
+.panel.fill > * {
+  flex: 0 0 auto
+}
+
+.panel.fill .table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none
+}
+
+.panel.fill .totals-bar {
+  position: static;
+  margin: 10px 0 0;
+  padding: 10px 16px;
+  background: #f7f8fb;
+  border: 1px solid #e9edf4;
+  border-top: 2px solid #4268e8;
+  border-radius: 10px;
+  box-shadow: none
+}
+
+.panel.fill .totals-items {
+  gap: 8px 36px
+}
+
+.panel.fill .totals-items div {
+  align-items: flex-end
+}
+
+@media(max-width:900px) {
+  .panel.fill {
+    height: calc(100dvh - 68px - 20px)
+  }
+}
+
+@media(max-width:560px) {
+  .panel.fill {
+    height: calc(100dvh - 120px);
+    padding: 12px
+  }
+
+  .panel.fill .totals-bar {
+    padding: 8px 12px
+  }
+
+  .panel.fill .totals-items div {
+    align-items: flex-start
+  }
+}

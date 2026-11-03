@@ -754,6 +754,7 @@ const api = useCallback(
       "voucher_no",
       "vehicle_number",
       "quantity",
+      "rate",
       "purchase_total",
     ],
 
@@ -763,6 +764,7 @@ const api = useCallback(
       "voucher_no",
       "vehicle_number",
       "quantity",
+      "rate",
       "gross_total",
       "payment_due_date",
     ],
@@ -778,6 +780,7 @@ const api = useCallback(
 
   const titleMap = {
     quantity: "Quantity (qtl)",
+    rate: "Rate (₹/qtl)",
     company_id: "Company",
     entry_date: "Date",
     payment_date: "Date",
@@ -800,6 +803,10 @@ const api = useCallback(
       ["gross_total", "purchase_total", "amount"].includes(key)
     ) {
       return money(value);
+    }
+
+    if (key === "rate") {
+      return value == null || value === "" ? "—" : money(value);
     }
 
     if (key === "quantity" || key === "unload_quantity") {
@@ -1049,6 +1056,24 @@ const api = useCallback(
             <b>{page}</b>
           </div>
 
+          {page !== "Dashboard" && (
+            <div className="searchbox top-search">
+              <Search size={16} />
+
+              <input
+                placeholder={
+                  page === TRACK
+                    ? "Search vehicle / voucher..."
+                    : page === SUMMARY
+                    ? "Search company..."
+                    : "Search records..."
+                }
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+              />
+            </div>
+          )}
+
           <div className="top-actions">
 
             {page !== "Dashboard" && page !== SUMMARY && (
@@ -1154,7 +1179,7 @@ const api = useCallback(
 
             /* VEHICLE TRACKING */
 
-            <div className="panel">
+            <div className="panel fill">
 
               <div className="table-toolbar">
 
@@ -1168,16 +1193,6 @@ const api = useCallback(
                     {" · purchase company → sale company, matched by vehicle"}
                     {summaryLoading && !summaryFirstLoad && " · refreshing…"}
                   </p>
-                </div>
-
-                <div className="searchbox">
-                  <Search size={16} />
-
-                  <input
-                    placeholder="Search vehicle / voucher..."
-                    value={search}
-                    onChange={(event) => setSearch(event.target.value)}
-                  />
                 </div>
 
               </div>
@@ -1375,7 +1390,7 @@ const api = useCallback(
 
             /* COMPANY SUMMARY */
 
-            <div className="panel">
+            <div className="panel fill">
 
               <div className="table-toolbar">
 
@@ -1386,16 +1401,6 @@ const api = useCallback(
                     {summary.rows.length} companies · purchases, sales, payments and dues
                     {summaryLoading && !summaryFirstLoad && " · refreshing…"}
                   </p>
-                </div>
-
-                <div className="searchbox">
-                  <Search size={16} />
-
-                  <input
-                    placeholder="Search company..."
-                    value={search}
-                    onChange={(event) => setSearch(event.target.value)}
-                  />
                 </div>
 
               </div>
@@ -1559,7 +1564,7 @@ const api = useCallback(
 
           ) : ( /* DATA TABLE */
 
-            <div className="panel">
+            <div className="panel fill">
 
               <div className="table-toolbar">
 
@@ -1578,89 +1583,79 @@ const api = useCallback(
                   </p>
                 </div>
 
-                <div className="searchbox">
-                  <Search size={16} />
-
-                  <input
-                    placeholder="Search records..."
-                    value={search}
-                    onChange={(event) => setSearch(event.target.value)}
-                  />
-                </div>
-
-              </div>
-
               {hasFilters && (
-                <div className="filter-bar">
+                  <div className="filter-bar">
 
-                  <label>
-                    Company
-                    <select
-                      value={filters.company}
-                      onChange={(e) =>
-                        dispatch(setFilter({ page, key: "company", value: e.target.value }))
-                      }
-                    >
-                      <option value="">All companies</option>
-                      {companies.map((c) => (
-                        <option key={c.id} value={c.id}>{c.name}</option>
-                      ))}
-                    </select>
-                  </label>
-
-                  <label>
-                    From
-                    <input
-                      type="date"
-                      value={filters.from}
-                      max={filters.to || undefined}
-                      onChange={(e) =>
-                        dispatch(setFilter({ page, key: "from", value: e.target.value }))
-                      }
-                    />
-                  </label>
-
-                  <label>
-                    To
-                    <input
-                      type="date"
-                      value={filters.to}
-                      min={filters.from || undefined}
-                      onChange={(e) =>
-                        dispatch(setFilter({ page, key: "to", value: e.target.value }))
-                      }
-                    />
-                  </label>
-
-                  {page === "Payments" && (
                     <label>
-                      Direction
+                      Company
                       <select
-                        value={filters.direction}
+                        value={filters.company}
                         onChange={(e) =>
-                          dispatch(setFilter({ page, key: "direction", value: e.target.value }))
+                          dispatch(setFilter({ page, key: "company", value: e.target.value }))
                         }
                       >
-                        <option value="">All</option>
-                        <option value="received">Received</option>
-                        <option value="paid">Paid</option>
+                        <option value="">All companies</option>
+                        {companies.map((c) => (
+                          <option key={c.id} value={c.id}>{c.name}</option>
+                        ))}
                       </select>
                     </label>
-                  )}
 
-                  {activeFilterCount > 0 && (
-                    <button
-                      type="button"
-                      className="secondary clear-filters"
-                      onClick={() => dispatch(clearFilters(page))}
-                    >
-                      <X size={14} />
-                      Clear filters ({activeFilterCount})
-                    </button>
-                  )}
+                    <label>
+                      From
+                      <input
+                        type="date"
+                        value={filters.from}
+                        max={filters.to || undefined}
+                        onChange={(e) =>
+                          dispatch(setFilter({ page, key: "from", value: e.target.value }))
+                        }
+                      />
+                    </label>
 
-                </div>
-              )}
+                    <label>
+                      To
+                      <input
+                        type="date"
+                        value={filters.to}
+                        min={filters.from || undefined}
+                        onChange={(e) =>
+                          dispatch(setFilter({ page, key: "to", value: e.target.value }))
+                        }
+                      />
+                    </label>
+
+                    {page === "Payments" && (
+                      <label>
+                        Direction
+                        <select
+                          value={filters.direction}
+                          onChange={(e) =>
+                            dispatch(setFilter({ page, key: "direction", value: e.target.value }))
+                          }
+                        >
+                          <option value="">All</option>
+                          <option value="received">Received</option>
+                          <option value="paid">Paid</option>
+                        </select>
+                      </label>
+                    )}
+
+                    {activeFilterCount > 0 && (
+                      <button
+                        type="button"
+                        className="secondary clear-filters"
+                        onClick={() => dispatch(clearFilters(page))}
+                      >
+                        <X size={14} />
+                        Clear filters ({activeFilterCount})
+                      </button>
+                    )}
+
+                  </div>
+                )}
+
+              </div>
 
               {firstLoad ? (
 
