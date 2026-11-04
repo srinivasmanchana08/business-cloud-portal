@@ -1,4 +1,3 @@
-
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { useDispatch, useSelector } from "react-redux";
@@ -32,7 +31,11 @@ import {
   Truck,
   ArrowDown,
   X,
+  FileSpreadsheet,
+  FileText,
 } from "lucide-react";
+
+import { exportExcel, exportPdf } from "./exportUtils";
 
 // =====================================================
 // 1. ENVIRONMENT CONFIGURATION
@@ -178,6 +181,7 @@ export default function App() {
   const [sTo, setSTo] = useState("");
 
   // Vehicle Tracking filters
+  const [exporting, setExporting] = useState(false);
   const [tPCompany, setTPCompany] = useState("");
   const [tSCompany, setTSCompany] = useState("");
   const [tFrom, setTFrom] = useState("");
@@ -643,6 +647,191 @@ const api = useCallback(
 
   const trackFiltered = Boolean(
     tPCompany || tSCompany || tFrom || tTo || tStatus || search
+  );
+
+  // ===================================================
+  // 10d. EXPORT (Excel / PDF) — exports exactly what is on screen
+  // ===================================================
+
+  function buildExport() {
+    const day = (v) => (v ? dayOf(v) : "");
+    const name = (id) => companyMap[id] || "";
+    const sumOf = (list, fn) => list.reduce((t, r) => t + Number(fn(r) || 0), 0);
+
+    // ---- Vehicle tracking
+    if (page === TRACK) {
+      const parts = [];
+      if (tPCompany) parts.push(`Purchase company: ${name(tPCompany)}`);
+      if (tSCompany) parts.push(`Sale company: ${name(tSCompany)}`);
+      if (tFrom) parts.push(`From ${tFrom}`);
+      if (tTo) parts.push(`To ${tTo}`);
+      if (tStatus) parts.push(`Status: ${tStatus}`);
+      if (search) parts.push(`Search: ${search}`);
+
+      const t = tracking.totals;
+
+      return {
+        title: "Vehicle Tracking",
+        filterText: parts.join(", "),
+        headers: [
+          "Vehicle", "Purchase company", "Purchase date", "Purchase qty (qtl)",
+          "Purchase total", "Sale company", "Sale date", "Sale qty (qtl)",
+          "Sale total", "Days", "Margin", "Status",
+        ],
+        kinds: [null, null, null, "qty", "money", null, null, "qty", "money", "int", "money", null],
+        rows: tracking.rows.map((r) => [
+          r.p?.vehicle_number || r.s?.vehicle_number || "",
+          r.p ? name(r.p.company_id) : "",
+          r.p ? day(r.p.entry_date) : "",
+          r.p ? Number(r.p.quantity || 0) : null,
+          r.p ? Number(r.p.purchase_total || 0) : null,
+          r.s ? name(r.s.company_id) : "",
+          r.s ? day(r.s.entry_date) : "",
+          r.s ? Number(r.s.quantity || 0) : null,
+          r.s ? Number(r.s.gross_total || 0) : null,
+          r.days,
+          r.margin,
+          r.status === "No purchase" ? "No purchase found" : r.status,
+        ]),
+        totalsRow: [
+          `Total (${tracking.rows.length} records)`, "", "", t.pQty, t.pTotal,
+          "", "", t.sQty, t.sTotal, null, t.margin, `${t.pending} pending`,
+        ],
+      };
+    }
+
+    // ---- Company summary
+    if (page === SUMMARY) {
+      const parts = [];
+      if (sCompany) parts.push(`Company: ${name(sCompany)}`);
+      if (sFrom) parts.push(`From ${sFrom}`);
+      if (sTo) parts.push(`To ${sTo}`);
+
+      const t = summary.totals;
+
+      return {
+        title: "Company Summary",
+        filterText: parts.join(", "),
+        headers: [
+          "Company", "Purchase qty (qtl)", "Purchase total", "Paid", "Payable due",
+          "Sales qty (qtl)", "Sales total", "Received", "Receivable due", "Net balance",
+        ],
+        kinds: [null, "qty", "money", "money", "money", "qty", "money", "money", "money", "money"],
+        rows: summary.rows.map((c) => [
+          c.name, c.pQty, c.pTotal, c.paid, c.payable,
+          c.sQty, c.sTotal, c.received, c.receivable, c.net,
+        ]),
+        totalsRow: [
+          "Total", t.pQty, t.pTotal, t.paid, t.payable,
+          t.sQty, t.sTotal, t.received, t.receivable, t.net,
+        ],
+      };
+    }
+
+    // ---- Purchases / Sales / Payments (current filters + search)
+    const parts = [];
+    if (filters.company) parts.push(`Company: ${name(filters.company)}`);
+    if (filters.from) parts.push(`From ${filters.from}`);
+    if (filters.to) parts.push(`To ${filters.to}`);
+    if (page === "Payments" && filters.direction) {
+      parts.push(`Direction: ${filters.direction}`);
+    }
+    if (search) parts.push(`Search: ${search}`);
+
+    if (page === "Payments") {
+      return {
+        title: "Payments",
+        filterText: parts.join(", "),
+        headers: ["Date", "Company", "Direction", "Amount", "Reference"],
+        kinds: [null, null, null, "money", null],
+        rows: filtered.map((r) => [
+          day(r.payment_date),
+          name(r.company_id),
+          r.direction === "received" ? "Received" : r.direction === "paid" ? "Paid" : r.direction || "",
+          Number(r.amount || 0),
+          r.reference || "",
+        ]),
+        summary: [
+          ["Payments received", totals.received, "money"],
+          ["Payments paid", totals.paid, "money"],
+          ["Net (received - paid)", totals.received - totals.paid, "money"],
+          ["Records", filtered.length, "int"],
+        ],
+      };
+    }
+
+    const keys = columns[page];
+    const kindOf = (key) =>
+      key === "quantity" ? "qty"
+      : ["rate", "gross_total", "purchase_total"].includes(key) ? "money"
+      : null;
+
+    const cellOf = (r, key) => {
+      if (key === "company_id") return name(r.company_id);
+      if (key === "entry_date" || key === "payment_due_date") return day(r[key]);
+      if (kindOf(key)) return r[key] == null || r[key] === "" ? null : Number(r[key]);
+      return r[key] ?? "";
+    };
+
+    const totalKey = TOTAL_KEY[page];
+
+    return {
+      title: page,
+      filterText: parts.join(", "),
+      headers: keys.map((k) => (titleMap[k] || k.replaceAll("_", " ")).replace("₹", "Rs.")),
+      kinds: keys.map(kindOf),
+      rows: filtered.map((r) => keys.map((k) => cellOf(r, k))),
+      totalsRow: keys.map((k, i) =>
+        i === 0 ? `Total (${filtered.length} records)`
+        : k === "quantity" ? totals.quantity
+        : k === totalKey ? totals.amount
+        : ""
+      ),
+    };
+  }
+
+  async function runExport(type) {
+    setExporting(true);
+    setError("");
+
+    try {
+      const spec = buildExport();
+      if (type === "pdf") await exportPdf(spec);
+      else await exportExcel(spec);
+    } catch (err) {
+      setError(
+        `Export failed: ${getErrorMessage(err)}. ` +
+          "If this is the first time, run: npm install xlsx jspdf jspdf-autotable"
+      );
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  const exportButtons = (
+    <div className="export-actions">
+      <button
+        type="button"
+        className="secondary"
+        disabled={exporting}
+        onClick={() => runExport("excel")}
+        title="Download the filtered data as Excel"
+      >
+        <FileSpreadsheet size={14} />
+        Excel
+      </button>
+
+      <button
+        type="button"
+        className="secondary"
+        disabled={exporting}
+        onClick={() => runExport("pdf")}
+        title="Download the filtered data as PDF"
+      >
+        <FileText size={14} />
+        PDF
+      </button>
+    </div>
   );
 
   // ===================================================
@@ -1195,6 +1384,8 @@ const api = useCallback(
                   </p>
                 </div>
 
+                {exportButtons}
+
               </div>
 
               <div className="filter-bar">
@@ -1402,6 +1593,8 @@ const api = useCallback(
                     {summaryLoading && !summaryFirstLoad && " · refreshing…"}
                   </p>
                 </div>
+
+                {exportButtons}
 
               </div>
 
@@ -1654,6 +1847,8 @@ const api = useCallback(
 
                   </div>
                 )}
+
+                {hasFilters && exportButtons}
 
               </div>
 

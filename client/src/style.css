@@ -1072,3 +1072,21 @@ td.num {
     align-items: flex-start
   }
 }
+
+
+/* ---------- export buttons ---------- */
+
+.export-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto
+}
+
+.export-actions .secondary {
+  padding: 8px 12px
+}
+
+.export-actions .secondary:disabled {
+  opacity: .6;
+  cursor: wait
+}
