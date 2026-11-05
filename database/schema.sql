@@ -104,6 +104,25 @@ drop policy if exists "owner_all" on public.vehicle_rents;
 create policy "owner_all" on public.vehicle_rents for all to authenticated
   using (owner_id = auth.uid()) with check (owner_id = auth.uid());
 
+-- Separate DDGS and Maize and Turmeric records.
+-- Run once in the Supabase SQL Editor (safe to re-run).
+-- Existing rows become "DDGS". Companies stay shared by both businesses.
+
+alter table public.purchases     add column if not exists business text not null default 'DDGS';
+alter table public.sales         add column if not exists business text not null default 'DDGS';
+alter table public.payments      add column if not exists business text not null default 'DDGS';
+alter table public.vehicle_rents add column if not exists business text not null default 'DDGS';
+
+do $$
+declare t text;
+begin
+  foreach t in array array['purchases','sales','payments','vehicle_rents'] loop
+    execute format('alter table public.%I drop constraint if exists %I', t, t || '_business_check');
+    execute format('alter table public.%I add constraint %I check (business in (''DDGS'', ''Maize and Turmeric''))', t, t || '_business_check');
+    execute format('create index if not exists %I on public.%I(business)', t || '_business_idx', t);
+  end loop;
+end $$;
+
 -- If you already have rows without an owner, assign them (replace the UUID):
 -- update public.companies set owner_id = 'YOUR-USER-UUID' where owner_id is null;
 -- (repeat for purchases, sales, payments)

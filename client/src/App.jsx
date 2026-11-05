@@ -8,9 +8,9 @@ import {
   deleteRecord,
   setFilter,
   clearFilters,
-  toggleSort,
   clearError,
   clearData,
+  setBusiness,
 } from "./store/dataSlice";
 
 import {
@@ -25,11 +25,15 @@ import {
   Search,
   Menu,
   Trash2,
-    Edit3,
-    ArrowUp,
-    Scale,
+  Edit3,
+  ArrowUp,
+  ArrowUpDown,
+  Scale,
   Truck,
   Banknote,
+  Folder,
+  FolderOpen,
+  ChevronDown,
   ArrowDown,
   X,
   FileSpreadsheet,
@@ -43,9 +47,7 @@ import { exportExcel, exportPdf } from "./exportUtils";
 // =====================================================
 
 // API BASE URL
-const API = (import.meta.env.VITE_API_URL || "")
-  .trim()
-  .replace(/\/+$/, "");
+const API = (import.meta.env.VITE_API_URL || "").trim().replace(/\/+$/, "");
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -56,7 +58,7 @@ if (!API) {
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
   throw new Error(
-    "Missing Supabase configuration. Check your frontend environment variables."
+    "Missing Supabase configuration. Check your frontend environment variables.",
   );
 }
 
@@ -70,15 +72,36 @@ const auth = createClient(SUPABASE_URL, SUPABASE_KEY);
 // 3. NAVIGATION
 // =====================================================
 
+// Pages shown directly in the sidebar
 const nav = [
   ["Dashboard", LayoutDashboard],
   ["Companies", Building2],
-  ["Purchases", ShoppingCart],
-  ["Sales", Receipt],
-  ["Payments", Wallet],
-  ["Company Summary", Scale],
-  ["Vehicle Tracking", Truck],
-  ["Vehicle Rent", Banknote],
+];
+
+// Dropdown folders in the sidebar. Add page names to `items` to move them in.
+const folders = [
+  {
+    name: "DDGS",
+    items: [
+      ["Purchases", ShoppingCart],
+      ["Sales", Receipt],
+      ["Payments", Wallet],
+      ["Company Summary", Scale],
+      ["Vehicle Tracking", Truck],
+      ["Vehicle Rent", Banknote],
+    ],
+  },
+  {
+    name: "Maize and Turmeric",
+    items: [
+      ["Purchases", ShoppingCart],
+      ["Sales", Receipt],
+      ["Payments", Wallet],
+      ["Company Summary", Scale],
+      ["Vehicle Tracking", Truck],
+      ["Vehicle Rent", Banknote],
+    ],
+  },
 ];
 
 // =====================================================
@@ -94,7 +117,7 @@ const money = (value) =>
 
 const qty = (value) =>
   new Intl.NumberFormat("en-IN", { maximumFractionDigits: 3 }).format(
-    Number(value || 0)
+    Number(value || 0),
   );
 
 const today = () => {
@@ -129,7 +152,10 @@ const RECORD_LABEL = {
 };
 
 // vehicle numbers compared without spaces / dashes / case
-const normVehicle = (v) => String(v || "").replace(/[\s-]/g, "").toUpperCase();
+const normVehicle = (v) =>
+  String(v || "")
+    .replace(/[\s-]/g, "")
+    .toUpperCase();
 
 const daysBetween = (from, to) =>
   Math.round((Date.parse(dayOf(to)) - Date.parse(dayOf(from))) / 86400000);
@@ -170,7 +196,7 @@ function matchRents(rents, purchases) {
           (a, b) =>
             Number(b.sameCo) - Number(a.sameCo) ||
             a.gap - b.gap ||
-            Number(b.free) - Number(a.free)
+            Number(b.free) - Number(a.free),
         )[0];
 
       if (!best) return;
@@ -182,6 +208,106 @@ function matchRents(rents, purchases) {
     });
 
   return { rentByPurchase, linked };
+}
+
+// ---------- column sorting (used by every table) ----------
+
+const NUMERIC_KEYS = [
+  "quantity",
+  "rate",
+  "purchase_total",
+  "gross_total",
+  "amount",
+  "credit_days",
+  "unload_quantity",
+];
+const DATE_KEYS = [
+  "entry_date",
+  "payment_date",
+  "payment_due_date",
+  "unload_date",
+  "paid_date",
+];
+
+const DEFAULT_SORT = {
+  Purchases: { key: "entry_date", dir: "desc" },
+  Sales: { key: "entry_date", dir: "desc" },
+  Payments: { key: "payment_date", dir: "desc" },
+};
+const NO_SORT = { key: "", dir: "asc" };
+
+const isEmptyValue = (v) =>
+  v === null ||
+  v === undefined ||
+  v === "" ||
+  (typeof v === "number" && Number.isNaN(v));
+
+// numbers compare as numbers, text compares naturally ("9" before "10"),
+// empty cells always go last
+function sortRows(rows, getter, sort, tie) {
+  if (!getter || !sort?.key) return rows;
+  const dir = sort.dir === "asc" ? 1 : -1;
+
+  return [...rows].sort((a, b) => {
+    const x = getter(a);
+    const y = getter(b);
+    const xe = isEmptyValue(x);
+    const ye = isEmptyValue(y);
+
+    if (xe || ye) return xe === ye ? 0 : xe ? 1 : -1;
+
+    const c =
+      typeof x === "number" && typeof y === "number"
+        ? x - y
+        : String(x).localeCompare(String(y), undefined, {
+            numeric: true,
+            sensitivity: "base",
+          });
+
+    if (c) return c * dir;
+    return tie ? tie(a, b) * dir : 0;
+  });
+}
+
+const byCreated = (a, b) =>
+  String(a.created_at || a.id).localeCompare(String(b.created_at || b.id));
+
+// first click: text A→Z, numbers and dates biggest / newest first
+const nextSort = (cur, key, firstDir) =>
+  cur.key === key
+    ? { key, dir: cur.dir === "asc" ? "desc" : "asc" }
+    : { key, dir: firstDir };
+
+function SortTh({
+  label,
+  k,
+  sort,
+  onSort,
+  kind = "text",
+  right = false,
+  title,
+}) {
+  const active = sort.key === k;
+  const Icon = !active ? ArrowUpDown : sort.dir === "asc" ? ArrowUp : ArrowDown;
+
+  return (
+    <th
+      className={right ? "num" : undefined}
+      aria-sort={
+        active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"
+      }
+    >
+      <button
+        type="button"
+        className={`sort-btn ${active ? "active" : ""}`}
+        onClick={() => onSort(k, kind === "text" ? "asc" : "desc")}
+        title={title || `Sort by ${label}`}
+      >
+        {label}
+        <Icon size={13} className={active ? "" : "sort-idle"} />
+      </button>
+    </th>
+  );
 }
 
 const getErrorMessage = (error) =>
@@ -201,16 +327,13 @@ export default function App() {
   const dataPage =
     page === TRACK ? "Purchases" : page === RENT ? "Rents" : page;
 
-    // ---- Redux (cached data, filters, sort)
+  // ---- Redux (cached data, filters, sort)
   const dispatch = useDispatch();
   const stats = useSelector((s) => s.data.stats);
   const storeError = useSelector((s) => s.data.error);
   const companies = useSelector((s) => s.data.lists.Companies.items);
   const list = useSelector((s) => s.data.lists[page]);
-  const filters =
-    useSelector((s) => s.data.filters[page]) || EMPTY_FILTERS;
-  const sortDir =
-    useSelector((s) => s.data.sortDir[page]) || "desc";
+  const filters = useSelector((s) => s.data.filters[page]) || EMPTY_FILTERS;
 
   const purchasesList = useSelector((s) => s.data.lists.Purchases);
   const salesList = useSelector((s) => s.data.lists.Sales);
@@ -225,7 +348,6 @@ export default function App() {
   const summaryLoading = summaryParts.some((l) => l.loading);
   const summaryFirstLoad = summaryParts.some((l) => l.loading && !l.loaded);
 
-
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
@@ -233,6 +355,12 @@ export default function App() {
   const [modal, setModal] = useState(false);
   const [editing, setEditing] = useState(null);
   const [mobile, setMobile] = useState(false);
+
+  // sidebar folders: open/closed
+  const [openFolders, setOpenFolders] = useState({ DDGS: true });
+
+  // which business the current page belongs to ("" = Dashboard / Companies)
+  const [biz, setBiz] = useState("");
 
   // Company Summary filters
   const [sCompany, setSCompany] = useState("");
@@ -246,7 +374,7 @@ export default function App() {
   const [tFrom, setTFrom] = useState("");
   const [tTo, setTTo] = useState("");
   const [tStatus, setTStatus] = useState("");
-  const [tDesc, setTDesc] = useState(true);
+  const [tSort, setTSort] = useState({ key: "pdate", dir: "desc" });
 
   // Vehicle Rent filters
   const [rCompany, setRCompany] = useState("");
@@ -254,7 +382,21 @@ export default function App() {
   const [rFrom, setRFrom] = useState("");
   const [rTo, setRTo] = useState("");
   const [rStatus, setRStatus] = useState("");
-  const [rDesc, setRDesc] = useState(true);
+  const [rSort, setRSort] = useState({ key: "entry_date", dir: "desc" });
+
+  // Company Summary + generic table sorting
+  const [sSort, setSSort] = useState({ key: "name", dir: "asc" });
+  const [dataSorts, setDataSorts] = useState({});
+  const dataSort = dataSorts[page] || DEFAULT_SORT[page] || NO_SORT;
+
+  const sortT = (k, d) => setTSort((c) => nextSort(c, k, d));
+  const sortR = (k, d) => setRSort((c) => nextSort(c, k, d));
+  const sortS = (k, d) => setSSort((c) => nextSort(c, k, d));
+  const sortData = (k, d) =>
+    setDataSorts((all) => ({
+      ...all,
+      [page]: nextSort(all[page] || DEFAULT_SORT[page] || NO_SORT, k, d),
+    }));
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -316,77 +458,75 @@ export default function App() {
     };
   }, [session]);
 
- // ===================================================
-// 8. CENTRAL API FUNCTION
-// ===================================================
+  // ===================================================
+  // 8. CENTRAL API FUNCTION
+  // ===================================================
 
-const api = useCallback(
-  async (path, options = {}) => {
-    if (!API) {
-      throw new Error(
-        "VITE_API_URL is missing. Check GitHub Actions variables."
-      );
-    }
+  const api = useCallback(
+    async (path, options = {}) => {
+      if (!API) {
+        throw new Error(
+          "VITE_API_URL is missing. Check GitHub Actions variables.",
+        );
+      }
 
-    const requestHeaders = await headers();
+      const requestHeaders = await headers();
 
-    const cleanPath = path.replace(/^\/+/, "");
-    const url = `${API}/${cleanPath}`;
+      const cleanPath = path.replace(/^\/+/, "");
+      const url = `${API}/${cleanPath}`;
 
-    let response;
+      let response;
 
-    try {
-      response = await fetch(url, {
-        ...options,
-        headers: {
-          ...requestHeaders,
-          ...options.headers,
-        },
-      });
-    } catch (err) {
-      console.error("API connection error:", err);
-
-      throw new Error(
-        "Cannot connect to Render backend. Check API URL and CORS."
-      );
-    }
-
-    const responseText = await response.text();
-
-    let data = null;
-
-    if (responseText) {
       try {
-        data = JSON.parse(responseText);
-      } catch {
-        console.error("Invalid API response:", {
-          url,
-          status: response.status,
-          response: responseText.slice(0, 300),
+        response = await fetch(url, {
+          ...options,
+          headers: {
+            ...requestHeaders,
+            ...options.headers,
+          },
         });
+      } catch (err) {
+        console.error("API connection error:", err);
 
         throw new Error(
-          `Invalid JSON response. HTTP ${response.status}. URL: ${url}`
-        );
-      }
-    }
-
-    if (!response.ok) {
-      if (response.status === 401) {
-        throw new Error(
-          "Authentication failed. Please sign in again."
+          "Cannot connect to Render backend. Check API URL and CORS.",
         );
       }
 
-      throw new Error(
-        data?.error || `API request failed (${response.status})`
-      );
-    }
+      const responseText = await response.text();
 
-    return data;
-  },
-  [headers]
-);
+      let data = null;
+
+      if (responseText) {
+        try {
+          data = JSON.parse(responseText);
+        } catch {
+          console.error("Invalid API response:", {
+            url,
+            status: response.status,
+            response: responseText.slice(0, 300),
+          });
+
+          throw new Error(
+            `Invalid JSON response. HTTP ${response.status}. URL: ${url}`,
+          );
+        }
+      }
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          throw new Error("Authentication failed. Please sign in again.");
+        }
+
+        throw new Error(
+          data?.error || `API request failed (${response.status})`,
+        );
+      }
+
+      return data;
+    },
+    [headers],
+  );
 
   // ===================================================
   // 9. LOAD DATA (cached in Redux, refreshed in background)
@@ -396,27 +536,27 @@ const api = useCallback(
     (force = false) => {
       if (!session) return;
 
-      dispatch(fetchStats({ api, force }));
+      dispatch(fetchStats({ api, force, business: biz }));
       dispatch(fetchList({ api, page: "Companies", force }));
 
       if (page === TRACK) {
         // rent is needed here to deduct it from the margin
         ["Purchases", "Sales", "Rents"].forEach((p) =>
-          dispatch(fetchList({ api, page: p, force }))
+          dispatch(fetchList({ api, page: p, force, business: biz })),
         );
       } else if (page === RENT) {
         ["Rents", "Purchases"].forEach((p) =>
-          dispatch(fetchList({ api, page: p, force }))
+          dispatch(fetchList({ api, page: p, force, business: biz })),
         );
       } else if (page === SUMMARY) {
         ["Purchases", "Sales", "Payments"].forEach((p) =>
-          dispatch(fetchList({ api, page: p, force }))
+          dispatch(fetchList({ api, page: p, force, business: biz })),
         );
       } else if (page !== "Dashboard" && page !== "Companies") {
-        dispatch(fetchList({ api, page, force }));
+        dispatch(fetchList({ api, page, force, business: biz }));
       }
     },
-    [session, page, api, dispatch]
+    [session, page, biz, api, dispatch],
   );
 
   useEffect(() => {
@@ -433,7 +573,7 @@ const api = useCallback(
 
   const companyMap = useMemo(
     () => Object.fromEntries(companies.map((c) => [c.id, c.name])),
-    [companies]
+    [companies],
   );
 
   const dateKey = DATE_KEY[page];
@@ -463,7 +603,8 @@ const api = useCallback(
 
       const day = dayOf(record[dateKey]);
 
-      if (filters.company && record.company_id !== filters.company) return false;
+      if (filters.company && record.company_id !== filters.company)
+        return false;
       if (filters.from && day < filters.from) return false;
       if (filters.to && day > filters.to) return false;
       if (
@@ -477,24 +618,18 @@ const api = useCallback(
       return true;
     });
 
-    if (dateKey) {
-      const dir = sortDir === "asc" ? 1 : -1;
+    const getValue = (key) => (r) => {
+      if (key === "company_id") return companyMap[r.company_id];
+      if (NUMERIC_KEYS.includes(key))
+        return r[key] == null || r[key] === "" ? null : Number(r[key]);
+      if (DATE_KEYS.includes(key)) return dayOf(r[key]) || null;
+      return r[key];
+    };
 
-      out = [...out].sort((a, b) => {
-        const byDate = dayOf(a[dateKey]).localeCompare(dayOf(b[dateKey]));
-        if (byDate) return byDate * dir;
-
-        // same date: newest entry first (or last when ascending)
-        return (
-          String(a.created_at || a.id).localeCompare(
-            String(b.created_at || b.id)
-          ) * dir
-        );
-      });
-    }
+    out = sortRows(out, getValue(dataSort.key), dataSort, byCreated);
 
     return out;
-  }, [rows, search, filters, sortDir, dateKey, page, companyMap]);
+  }, [rows, search, filters, dataSort, dateKey, page, companyMap]);
 
   // Totals follow the active filters and search
   const totals = useMemo(() => {
@@ -531,8 +666,12 @@ const api = useCallback(
         byCompany[id] = {
           id,
           name: companyMap[id] || "Unknown company",
-          pQty: 0, pTotal: 0, paid: 0,
-          sQty: 0, sTotal: 0, received: 0,
+          pQty: 0,
+          pTotal: 0,
+          paid: 0,
+          sQty: 0,
+          sTotal: 0,
+          received: 0,
         };
       }
       return byCompany[id];
@@ -561,27 +700,43 @@ const api = useCallback(
 
     const q = search.trim().toLowerCase();
 
-    const out = Object.values(byCompany)
+    const unsorted = Object.values(byCompany)
       .filter((c) => !sCompany || c.id === sCompany)
       .filter((c) => !q || c.name.toLowerCase().includes(q))
       .map((c) => {
         const payable = c.pTotal - c.paid;
         const receivable = c.sTotal - c.received;
         return { ...c, payable, receivable, net: receivable - payable };
-      })
-      .sort((a, b) => a.name.localeCompare(b.name));
+      });
+    const out = sortRows(unsorted, (c) => c[sSort.key], sSort);
 
     const sum = (key) => out.reduce((n, c) => n + c[key], 0);
 
     return {
       rows: out,
       totals: {
-        pQty: sum("pQty"), pTotal: sum("pTotal"), paid: sum("paid"),
-        sQty: sum("sQty"), sTotal: sum("sTotal"), received: sum("received"),
-        payable: sum("payable"), receivable: sum("receivable"), net: sum("net"),
+        pQty: sum("pQty"),
+        pTotal: sum("pTotal"),
+        paid: sum("paid"),
+        sQty: sum("sQty"),
+        sTotal: sum("sTotal"),
+        received: sum("received"),
+        payable: sum("payable"),
+        receivable: sum("receivable"),
+        net: sum("net"),
       },
     };
-  }, [purchasesList, salesList, paymentsList, companyMap, sCompany, sFrom, sTo, search]);
+  }, [
+    purchasesList,
+    salesList,
+    paymentsList,
+    companyMap,
+    sCompany,
+    sFrom,
+    sTo,
+    search,
+    sSort,
+  ]);
 
   // ===================================================
   // 10c. VEHICLE TRACKING (purchase → sale, matched by vehicle)
@@ -592,7 +747,7 @@ const api = useCallback(
     const { rentByPurchase } = matchRents(rentsList.items, purchasesList.items);
 
     const sales = [...salesList.items].sort((a, b) =>
-      dayOf(a.entry_date).localeCompare(dayOf(b.entry_date))
+      dayOf(a.entry_date).localeCompare(dayOf(b.entry_date)),
     );
 
     const byVoucher = {};
@@ -616,7 +771,9 @@ const api = useCallback(
       if (!match) {
         const candidates = (byVehicle[normVehicle(s.vehicle_number)] || [])
           .filter((p) => dayOf(p.entry_date) <= dayOf(s.entry_date))
-          .sort((a, b) => dayOf(b.entry_date).localeCompare(dayOf(a.entry_date)));
+          .sort((a, b) =>
+            dayOf(b.entry_date).localeCompare(dayOf(a.entry_date)),
+          );
 
         match = candidates.find((p) => !p._sales.length) || candidates[0];
       }
@@ -638,18 +795,34 @@ const api = useCallback(
             p,
             s,
             single: p._sales.length === 1,
-          })
+          }),
         );
       }
     });
 
     orphans.forEach((s) =>
-      all.push({ key: `s-${s.id}`, status: "No purchase", p: null, s })
+      all.push({ key: `s-${s.id}`, status: "No purchase", p: null, s }),
     );
 
     const q = search.trim().toLowerCase();
 
-    const rowsOut = all
+    const trackGet = {
+      vehicle: (r) => r.p?.vehicle_number || r.s?.vehicle_number,
+      pco: (r) => companyMap[r.p?.company_id],
+      pdate: (r) => dayOf((r.p || r.s).entry_date),
+      pqty: (r) => (r.p ? Number(r.p.quantity || 0) : null),
+      ptotal: (r) => (r.p ? Number(r.p.purchase_total || 0) : null),
+      sco: (r) => companyMap[r.s?.company_id],
+      sdate: (r) => (r.s ? dayOf(r.s.entry_date) : null),
+      sqty: (r) => (r.s ? Number(r.s.quantity || 0) : null),
+      stotal: (r) => (r.s ? Number(r.s.gross_total || 0) : null),
+      days: (r) => r.days,
+      rent: (r) => (r.p ? r.rent : null),
+      margin: (r) => r.margin,
+      status: (r) => r.status,
+    };
+
+    const unsorted = all
       .filter((r) => {
         const date = dayOf((r.p || r.s).entry_date);
 
@@ -691,18 +864,20 @@ const api = useCallback(
                 rent
               : null,
         };
-      })
-      .sort((a, b) => {
-        const da = dayOf((a.p || a.s).entry_date);
-        const db = dayOf((b.p || b.s).entry_date);
-        return da.localeCompare(db) * (tDesc ? -1 : 1);
       });
+    const rowsOut = sortRows(unsorted, trackGet[tSort.key], tSort);
 
     // totals: each purchase counted once even if sold in several parts
     const seen = new Set();
     const totals = {
-      pQty: 0, pTotal: 0, sQty: 0, sTotal: 0,
-      soldPurchase: 0, rent: 0, soldRent: 0, pending: 0,
+      pQty: 0,
+      pTotal: 0,
+      sQty: 0,
+      sTotal: 0,
+      soldPurchase: 0,
+      rent: 0,
+      soldRent: 0,
+      pending: 0,
     };
 
     rowsOut.forEach((r) => {
@@ -729,12 +904,21 @@ const api = useCallback(
 
     return { rows: rowsOut, totals };
   }, [
-    purchasesList, salesList, rentsList, companyMap,
-    tPCompany, tSCompany, tFrom, tTo, tStatus, tDesc, search,
+    purchasesList,
+    salesList,
+    rentsList,
+    companyMap,
+    tPCompany,
+    tSCompany,
+    tFrom,
+    tTo,
+    tStatus,
+    tSort,
+    search,
   ]);
 
   const trackFiltered = Boolean(
-    tPCompany || tSCompany || tFrom || tTo || tStatus || search
+    tPCompany || tSCompany || tFrom || tTo || tStatus || search,
   );
 
   // ===================================================
@@ -744,9 +928,19 @@ const api = useCallback(
   const rentView = useMemo(() => {
     const { linked } = matchRents(rentsList.items, purchasesList.items);
     const q = search.trim().toLowerCase();
-    const dir = rDesc ? -1 : 1;
+    const rentGet = {
+      entry_date: (r) => dayOf(r.entry_date),
+      company: (r) => companyMap[r.company_id],
+      vehicle_number: (r) => r.vehicle_number,
+      paid_date: (r) => (r.paid_date ? dayOf(r.paid_date) : null),
+      amount: (r) =>
+        r.amount == null || r.amount === "" ? null : Number(r.amount),
+      account_name: (r) => r.account_name,
+      status: (r) => (r.paid_date ? "Paid" : "Unpaid"),
+      link: (r) => (r.isLinked ? "Linked" : "No purchase found"),
+    };
 
-    const rowsOut = rentsList.items
+    const unsorted = rentsList.items
       .filter((r) => {
         const day = dayOf(r.entry_date);
 
@@ -754,10 +948,15 @@ const api = useCallback(
         if (rAccount && (r.account_name || "") !== rAccount) return false;
         if (rFrom && day < rFrom) return false;
         if (rTo && day > rTo) return false;
-        if (rStatus && (r.paid_date ? "Paid" : "Unpaid") !== rStatus) return false;
+        if (rStatus && (r.paid_date ? "Paid" : "Unpaid") !== rStatus)
+          return false;
 
         if (q) {
-          const text = [r.vehicle_number, r.account_name, companyMap[r.company_id]]
+          const text = [
+            r.vehicle_number,
+            r.account_name,
+            companyMap[r.company_id],
+          ]
             .join(" ")
             .toLowerCase();
           if (!text.includes(q)) return false;
@@ -765,15 +964,16 @@ const api = useCallback(
 
         return true;
       })
-      .map((r) => ({ ...r, isLinked: Boolean(linked[r.id]) }))
-      .sort(
-        (a, b) =>
-          (dayOf(a.entry_date).localeCompare(dayOf(b.entry_date)) ||
-            String(a.created_at || a.id).localeCompare(String(b.created_at || b.id))) *
-          dir
-      );
+      .map((r) => ({ ...r, isLinked: Boolean(linked[r.id]) }));
+    const rowsOut = sortRows(unsorted, rentGet[rSort.key], rSort, byCreated);
 
-    const totals = { amount: 0, paid: 0, unpaid: 0, unpaidCount: 0, unlinked: 0 };
+    const totals = {
+      amount: 0,
+      paid: 0,
+      unpaid: 0,
+      unpaidCount: 0,
+      unlinked: 0,
+    };
 
     rowsOut.forEach((r) => {
       const amount = Number(r.amount || 0);
@@ -795,12 +995,20 @@ const api = useCallback(
 
     return { rows: rowsOut, totals, accounts };
   }, [
-    rentsList, purchasesList, companyMap,
-    rCompany, rAccount, rFrom, rTo, rStatus, rDesc, search,
+    rentsList,
+    purchasesList,
+    companyMap,
+    rCompany,
+    rAccount,
+    rFrom,
+    rTo,
+    rStatus,
+    rSort,
+    search,
   ]);
 
   const rentFiltered = Boolean(
-    rCompany || rAccount || rFrom || rTo || rStatus || search
+    rCompany || rAccount || rFrom || rTo || rStatus || search,
   );
 
   // ===================================================
@@ -810,7 +1018,8 @@ const api = useCallback(
   function buildExport() {
     const day = (v) => (v ? dayOf(v) : "");
     const name = (id) => companyMap[id] || "";
-    const sumOf = (list, fn) => list.reduce((t, r) => t + Number(fn(r) || 0), 0);
+    const sumOf = (list, fn) =>
+      list.reduce((t, r) => t + Number(fn(r) || 0), 0);
 
     // ---- Vehicle tracking
     if (page === TRACK) {
@@ -828,11 +1037,35 @@ const api = useCallback(
         title: "Vehicle Tracking",
         filterText: parts.join(", "),
         headers: [
-          "Vehicle", "Purchase company", "Purchase date", "Purchase qty (qtl)",
-          "Purchase total", "Sale company", "Sale date", "Sale qty (qtl)",
-          "Sale total", "Days", "Vehicle rent", "Margin", "Status",
+          "Vehicle",
+          "Purchase company",
+          "Purchase date",
+          "Purchase qty (qtl)",
+          "Purchase total",
+          "Sale company",
+          "Sale date",
+          "Sale qty (qtl)",
+          "Sale total",
+          "Days",
+          "Vehicle rent",
+          "Margin",
+          "Status",
         ],
-        kinds: [null, null, null, "qty", "money", null, null, "qty", "money", "int", "money", "money", null],
+        kinds: [
+          null,
+          null,
+          null,
+          "qty",
+          "money",
+          null,
+          null,
+          "qty",
+          "money",
+          "int",
+          "money",
+          "money",
+          null,
+        ],
         rows: tracking.rows.map((r) => [
           r.p?.vehicle_number || r.s?.vehicle_number || "",
           r.p ? name(r.p.company_id) : "",
@@ -849,8 +1082,19 @@ const api = useCallback(
           r.status === "No purchase" ? "No purchase found" : r.status,
         ]),
         totalsRow: [
-          `Total (${tracking.rows.length} records)`, "", "", t.pQty, t.pTotal,
-          "", "", t.sQty, t.sTotal, null, t.rent, t.margin, `${t.pending} pending`,
+          `Total (${tracking.rows.length} records)`,
+          "",
+          "",
+          t.pQty,
+          t.pTotal,
+          "",
+          "",
+          t.sQty,
+          t.sTotal,
+          null,
+          t.rent,
+          t.margin,
+          `${t.pending} pending`,
         ],
       };
     }
@@ -871,8 +1115,13 @@ const api = useCallback(
         title: "Vehicle Rent",
         filterText: parts.join(", "),
         headers: [
-          "Purchase date", "Purchase company", "Vehicle", "Paid date",
-          "Rent amount", "Account name", "Status",
+          "Purchase date",
+          "Purchase company",
+          "Vehicle",
+          "Paid date",
+          "Rent amount",
+          "Account name",
+          "Status",
         ],
         kinds: [null, null, null, null, "money", null, null],
         rows: rentView.rows.map((r) => [
@@ -885,8 +1134,13 @@ const api = useCallback(
           r.paid_date ? "Paid" : "Unpaid",
         ]),
         totalsRow: [
-          `Total (${rentView.rows.length} records)`, "", "", "",
-          t.amount, "", `${t.unpaidCount} unpaid`,
+          `Total (${rentView.rows.length} records)`,
+          "",
+          "",
+          "",
+          t.amount,
+          "",
+          `${t.unpaidCount} unpaid`,
         ],
         summary: [
           ["Rent paid", t.paid, "money"],
@@ -909,17 +1163,52 @@ const api = useCallback(
         title: "Company Summary",
         filterText: parts.join(", "),
         headers: [
-          "Company", "Purchase qty (qtl)", "Purchase total", "Paid", "Payable due",
-          "Sales qty (qtl)", "Sales total", "Received", "Receivable due", "Net balance",
+          "Company",
+          "Purchase qty (qtl)",
+          "Purchase total",
+          "Paid",
+          "Payable due",
+          "Sales qty (qtl)",
+          "Sales total",
+          "Received",
+          "Receivable due",
+          "Net balance",
         ],
-        kinds: [null, "qty", "money", "money", "money", "qty", "money", "money", "money", "money"],
+        kinds: [
+          null,
+          "qty",
+          "money",
+          "money",
+          "money",
+          "qty",
+          "money",
+          "money",
+          "money",
+          "money",
+        ],
         rows: summary.rows.map((c) => [
-          c.name, c.pQty, c.pTotal, c.paid, c.payable,
-          c.sQty, c.sTotal, c.received, c.receivable, c.net,
+          c.name,
+          c.pQty,
+          c.pTotal,
+          c.paid,
+          c.payable,
+          c.sQty,
+          c.sTotal,
+          c.received,
+          c.receivable,
+          c.net,
         ]),
         totalsRow: [
-          "Total", t.pQty, t.pTotal, t.paid, t.payable,
-          t.sQty, t.sTotal, t.received, t.receivable, t.net,
+          "Total",
+          t.pQty,
+          t.pTotal,
+          t.paid,
+          t.payable,
+          t.sQty,
+          t.sTotal,
+          t.received,
+          t.receivable,
+          t.net,
         ],
       };
     }
@@ -943,7 +1232,11 @@ const api = useCallback(
         rows: filtered.map((r) => [
           day(r.payment_date),
           name(r.company_id),
-          r.direction === "received" ? "Received" : r.direction === "paid" ? "Paid" : r.direction || "",
+          r.direction === "received"
+            ? "Received"
+            : r.direction === "paid"
+              ? "Paid"
+              : r.direction || "",
           Number(r.amount || 0),
           r.reference || "",
         ]),
@@ -958,14 +1251,18 @@ const api = useCallback(
 
     const keys = columns[page];
     const kindOf = (key) =>
-      key === "quantity" ? "qty"
-      : ["rate", "gross_total", "purchase_total"].includes(key) ? "money"
-      : null;
+      key === "quantity"
+        ? "qty"
+        : ["rate", "gross_total", "purchase_total"].includes(key)
+          ? "money"
+          : null;
 
     const cellOf = (r, key) => {
       if (key === "company_id") return name(r.company_id);
-      if (key === "entry_date" || key === "payment_due_date") return day(r[key]);
-      if (kindOf(key)) return r[key] == null || r[key] === "" ? null : Number(r[key]);
+      if (key === "entry_date" || key === "payment_due_date")
+        return day(r[key]);
+      if (kindOf(key))
+        return r[key] == null || r[key] === "" ? null : Number(r[key]);
       return r[key] ?? "";
     };
 
@@ -974,14 +1271,19 @@ const api = useCallback(
     return {
       title: page,
       filterText: parts.join(", "),
-      headers: keys.map((k) => (titleMap[k] || k.replaceAll("_", " ")).replace("₹", "Rs.")),
+      headers: keys.map((k) =>
+        (titleMap[k] || k.replaceAll("_", " ")).replace("₹", "Rs."),
+      ),
       kinds: keys.map(kindOf),
       rows: filtered.map((r) => keys.map((k) => cellOf(r, k))),
       totalsRow: keys.map((k, i) =>
-        i === 0 ? `Total (${filtered.length} records)`
-        : k === "quantity" ? totals.quantity
-        : k === totalKey ? totals.amount
-        : ""
+        i === 0
+          ? `Total (${filtered.length} records)`
+          : k === "quantity"
+            ? totals.quantity
+            : k === totalKey
+              ? totals.amount
+              : "",
       ),
     };
   }
@@ -992,12 +1294,13 @@ const api = useCallback(
 
     try {
       const spec = buildExport();
+      if (biz) spec.title = `${spec.title} - ${biz}`;
       if (type === "pdf") await exportPdf(spec);
       else await exportExcel(spec);
     } catch (err) {
       setError(
         `Export failed: ${getErrorMessage(err)}. ` +
-          "If this is the first time, run: npm install xlsx jspdf jspdf-autotable"
+          "If this is the first time, run: npm install xlsx jspdf jspdf-autotable",
       );
     } finally {
       setExporting(false);
@@ -1136,12 +1439,7 @@ const api = useCallback(
   // ===================================================
 
   const columns = {
-    Companies: [
-      "name",
-      "company_type",
-      "credit_days",
-      "phone",
-    ],
+    Companies: ["name", "company_type", "credit_days", "phone"],
 
     Purchases: [
       "entry_date",
@@ -1194,9 +1492,7 @@ const api = useCallback(
       return companyMap[value] || "—";
     }
 
-    if (
-      ["gross_total", "purchase_total", "amount"].includes(key)
-    ) {
+    if (["gross_total", "purchase_total", "amount"].includes(key)) {
       return money(value);
     }
 
@@ -1264,8 +1560,14 @@ const api = useCallback(
         }
       });
 
-            await dispatch(
-        saveRecord({ api, page: dataPage, id: editing?.id, body })
+      await dispatch(
+        saveRecord({
+          api,
+          page: dataPage,
+          id: editing?.id,
+          body,
+          business: biz,
+        }),
       ).unwrap();
 
       setModal(false);
@@ -1290,7 +1592,9 @@ const api = useCallback(
     setBusy(true);
 
     try {
-            await dispatch(deleteRecord({ api, page: dataPage, id })).unwrap();
+      await dispatch(
+        deleteRecord({ api, page: dataPage, id, business: biz }),
+      ).unwrap();
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -1328,15 +1632,12 @@ const api = useCallback(
 
           <h1>Welcome back</h1>
 
-          <p className="muted">
-            Sign in to manage your business records.
-          </p>
+          <p className="muted">Sign in to manage your business records.</p>
 
           {error && <div className="error">{error}</div>}
 
           <label>
             Email
-
             <input
               type="email"
               value={email}
@@ -1348,7 +1649,6 @@ const api = useCallback(
 
           <label>
             Password
-
             <input
               type="password"
               value={password}
@@ -1376,42 +1676,98 @@ const api = useCallback(
 
   return (
     <div className="app-shell">
-
       {/* SIDEBAR */}
 
       <aside className={`sidebar ${mobile ? "open" : ""}`}>
-
         <div className="brand">
-          <div className="brand-mark">BC</div>
+          <div className="brand-mark">MS</div>
 
           <div>
-            <b>Business Portal</b>
-            <small>MANAGEMENT SYSTEM</small>
+            <b>MANCHANA SRINIVAS</b>
+            <small>CRM</small>
           </div>
         </div>
 
         <div className="nav-label">WORKSPACE</div>
 
-        {nav.map(([name, Icon]) => (
-          <button
-            key={name}
-            className={`nav-item ${
-              page === name ? "active" : ""
-            }`}
-            onClick={() => {
-              setPage(name);
-              setSearch("");
-              dispatch(clearError());
-              setMobile(false);
-            }}
-          >
-            <Icon size={18} />
-            {name}
-          </button>
-        ))}
+        {(() => {
+          const goTo = (name, business = "") => {
+            // switch the cached data first so the old business never flashes
+            dispatch(setBusiness(business));
+            setBiz(business);
+            setPage(name);
+            setSearch("");
+            dispatch(clearError());
+            setMobile(false);
+          };
+
+          return (
+            <>
+              {nav.map(([name, Icon]) => (
+                <button
+                  key={name}
+                  className={`nav-item ${!biz && page === name ? "active" : ""}`}
+                  onClick={() => goTo(name)}
+                >
+                  <Icon size={18} />
+                  {name}
+                </button>
+              ))}
+
+              {folders.map((folder) => {
+                const open = Boolean(openFolders[folder.name]);
+                const holdsPage =
+                  biz === folder.name && folder.items.some(([n]) => n === page);
+                const FolderIcon = open ? FolderOpen : Folder;
+
+                return (
+                  <div className="nav-folder" key={folder.name}>
+                    <button
+                      type="button"
+                      className={`nav-item nav-folder-btn ${holdsPage ? "has-active" : ""}`}
+                      aria-expanded={open}
+                      onClick={() =>
+                        setOpenFolders((f) => ({ ...f, [folder.name]: !open }))
+                      }
+                    >
+                      <FolderIcon size={18} />
+                      <span className="nav-folder-name">{folder.name}</span>
+                      <ChevronDown
+                        size={15}
+                        className={`nav-chevron ${open ? "open" : ""}`}
+                      />
+                    </button>
+
+                    {open && (
+                      <div className="nav-sub">
+                        {folder.items.length ? (
+                          folder.items.map(([name, Icon]) => (
+                            <button
+                              key={name}
+                              className={`nav-item ${
+                                biz === folder.name && page === name
+                                  ? "active"
+                                  : ""
+                              }`}
+                              onClick={() => goTo(name, folder.name)}
+                            >
+                              <Icon size={17} />
+                              {name}
+                            </button>
+                          ))
+                        ) : (
+                          <p className="nav-empty">No pages yet</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </>
+          );
+        })()}
 
         <div className="sidebar-bottom">
-
           <div className="user-chip">
             <div className="avatar">
               {session.user.email?.[0]?.toUpperCase()}
@@ -1427,18 +1783,15 @@ const api = useCallback(
             <LogOut size={18} />
             Sign out
           </button>
-
         </div>
       </aside>
 
       {/* MAIN CONTENT */}
 
       <main className="main">
-
         {/* TOPBAR */}
 
         <header className="topbar">
-
           <button
             className="icon-btn mobile-menu"
             onClick={() => setMobile(!mobile)}
@@ -1447,7 +1800,7 @@ const api = useCallback(
           </button>
 
           <div>
-            <span className="muted">Workspace / </span>
+            <span className="muted">{biz ? `${biz} / ` : "Workspace / "}</span>
             <b>{page}</b>
           </div>
 
@@ -1460,10 +1813,10 @@ const api = useCallback(
                   page === RENT
                     ? "Search vehicle / account..."
                     : page === TRACK
-                    ? "Search vehicle / voucher..."
-                    : page === SUMMARY
-                    ? "Search company..."
-                    : "Search records..."
+                      ? "Search vehicle / voucher..."
+                      : page === SUMMARY
+                        ? "Search company..."
+                        : "Search records..."
                 }
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
@@ -1472,7 +1825,6 @@ const api = useCallback(
           )}
 
           <div className="top-actions">
-
             {page !== "Dashboard" && page !== SUMMARY && (
               <button
                 className="primary"
@@ -1497,35 +1849,27 @@ const api = useCallback(
             >
               <RefreshCw size={17} />
             </button>
-
           </div>
         </header>
 
         {/* PAGE CONTENT */}
 
         <section className="content">
-
           {/* ERROR MESSAGE */}
 
           {(error || storeError) && (
-            <div className="error">
-              {error || storeError}
-            </div>
+            <div className="error">{error || storeError}</div>
           )}
 
           {/* LOADING */}
 
-          {busy && (
-            <p className="muted">Processing request...</p>
-          )}
+          {busy && <p className="muted">Processing request...</p>}
 
           {/* DASHBOARD */}
 
           {page === "Dashboard" ? (
-
             <>
               <div className="stat-grid">
-
                 {[
                   ["Total sales", stats?.sales, "blue"],
                   ["Total purchases", stats?.purchases, "violet"],
@@ -1534,9 +1878,7 @@ const api = useCallback(
                   ["Receivable balance", stats?.receivable, "green"],
                   ["Payable balance", stats?.payable, "red"],
                 ].map(([title, value, color]) => (
-
                   <div className="stat-card" key={title}>
-
                     <span>{title}</span>
 
                     <strong>{money(value)}</strong>
@@ -1546,15 +1888,11 @@ const api = useCallback(
                     <div className={`stat-icon ${color}`}>
                       <Wallet size={18} />
                     </div>
-
                   </div>
-
                 ))}
-
               </div>
 
               <div className="panel">
-
                 <div className="panel-head">
                   <div>
                     <h3>Net cash position</h3>
@@ -1565,21 +1903,14 @@ const api = useCallback(
                   </div>
                 </div>
 
-                <div className="net-value">
-                  {money(stats?.net)}
-                </div>
-
+                <div className="net-value">{money(stats?.net)}</div>
               </div>
             </>
-
           ) : page === TRACK ? (
-
             /* VEHICLE TRACKING */
 
             <div className="panel fill">
-
               <div className="table-toolbar">
-
                 <div>
                   <h3>Vehicle tracking</h3>
 
@@ -1593,11 +1924,9 @@ const api = useCallback(
                 </div>
 
                 {exportButtons}
-
               </div>
 
               <div className="filter-bar">
-
                 <label>
                   Purchase company
                   <select
@@ -1606,7 +1935,9 @@ const api = useCallback(
                   >
                     <option value="">All companies</option>
                     {companies.map((c) => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
                     ))}
                   </select>
                 </label>
@@ -1619,7 +1950,9 @@ const api = useCallback(
                   >
                     <option value="">All companies</option>
                     {companies.map((c) => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
                     ))}
                   </select>
                 </label>
@@ -1674,89 +2007,184 @@ const api = useCallback(
                     Clear filters
                   </button>
                 )}
-
               </div>
 
               {summaryFirstLoad ? (
-
                 <p className="muted pad">Loading records...</p>
-
               ) : (
-
                 <div className="table-wrap">
-
                   <table className="summary-table">
-
                     <thead>
                       <tr>
-                        <th>Vehicle</th>
-                        <th>Purchase company</th>
-                        <th>
-                          <button
-                            type="button"
-                            className="sort-btn"
-                            onClick={() => setTDesc(!tDesc)}
-                            title={tDesc ? "Newest first — click for oldest first" : "Oldest first — click for newest first"}
-                          >
-                            Purchase date
-                            {tDesc ? <ArrowDown size={13} /> : <ArrowUp size={13} />}
-                          </button>
-                        </th>
-                        <th className="num">Qty (qtl)</th>
-                        <th className="num">Purchase total</th>
-                        <th>Sale company</th>
-                        <th>Sale date</th>
-                        <th className="num">Qty (qtl)</th>
-                        <th className="num">Sale total</th>
-                        <th className="num">Days</th>
-                        <th className="num">Rent</th>
-                        <th className="num" title="Sale total - purchase total - vehicle rent">Margin</th>
-                        <th>Status</th>
+                        <SortTh
+                          label="Vehicle"
+                          k="vehicle"
+                          kind="text"
+                          sort={tSort}
+                          onSort={sortT}
+                        />
+                        <SortTh
+                          label="Purchase company"
+                          k="pco"
+                          kind="text"
+                          sort={tSort}
+                          onSort={sortT}
+                        />
+                        <SortTh
+                          label="Purchase date"
+                          k="pdate"
+                          kind="date"
+                          sort={tSort}
+                          onSort={sortT}
+                        />
+                        <SortTh
+                          label="Qty (qtl)"
+                          k="pqty"
+                          kind="num"
+                          right
+                          sort={tSort}
+                          onSort={sortT}
+                        />
+                        <SortTh
+                          label="Purchase total"
+                          k="ptotal"
+                          kind="num"
+                          right
+                          sort={tSort}
+                          onSort={sortT}
+                        />
+                        <SortTh
+                          label="Sale company"
+                          k="sco"
+                          kind="text"
+                          sort={tSort}
+                          onSort={sortT}
+                        />
+                        <SortTh
+                          label="Sale date"
+                          k="sdate"
+                          kind="date"
+                          sort={tSort}
+                          onSort={sortT}
+                        />
+                        <SortTh
+                          label="Qty (qtl)"
+                          k="sqty"
+                          kind="num"
+                          right
+                          sort={tSort}
+                          onSort={sortT}
+                        />
+                        <SortTh
+                          label="Sale total"
+                          k="stotal"
+                          kind="num"
+                          right
+                          sort={tSort}
+                          onSort={sortT}
+                        />
+                        <SortTh
+                          label="Days"
+                          k="days"
+                          kind="num"
+                          right
+                          sort={tSort}
+                          onSort={sortT}
+                        />
+                        <SortTh
+                          label="Rent"
+                          k="rent"
+                          kind="num"
+                          right
+                          sort={tSort}
+                          onSort={sortT}
+                        />
+                        <SortTh
+                          label="Margin"
+                          k="margin"
+                          kind="num"
+                          right
+                          sort={tSort}
+                          onSort={sortT}
+                          title="Sale total - purchase total - vehicle rent"
+                        />
+                        <SortTh
+                          label="Status"
+                          k="status"
+                          kind="text"
+                          sort={tSort}
+                          onSort={sortT}
+                        />
                       </tr>
                     </thead>
 
                     <tbody>
                       {tracking.rows.map((r) => (
                         <tr key={r.key}>
-                          <td><b>{r.p?.vehicle_number || r.s?.vehicle_number || "—"}</b></td>
-                          <td>{r.p ? companyMap[r.p.company_id] || "—" : "—"}</td>
+                          <td>
+                            <b>
+                              {r.p?.vehicle_number ||
+                                r.s?.vehicle_number ||
+                                "—"}
+                            </b>
+                          </td>
+                          <td>
+                            {r.p ? companyMap[r.p.company_id] || "—" : "—"}
+                          </td>
                           <td>{r.p ? dayOf(r.p.entry_date) : "—"}</td>
-                          <td className="num">{r.p ? qty(r.p.quantity) : "—"}</td>
-                          <td className="num">{r.p ? money(r.p.purchase_total) : "—"}</td>
-                          <td>{r.s ? companyMap[r.s.company_id] || "—" : "—"}</td>
+                          <td className="num">
+                            {r.p ? qty(r.p.quantity) : "—"}
+                          </td>
+                          <td className="num">
+                            {r.p ? money(r.p.purchase_total) : "—"}
+                          </td>
+                          <td>
+                            {r.s ? companyMap[r.s.company_id] || "—" : "—"}
+                          </td>
                           <td>{r.s ? dayOf(r.s.entry_date) : "—"}</td>
-                          <td className="num">{r.s ? qty(r.s.quantity) : "—"}</td>
-                          <td className="num">{r.s ? money(r.s.gross_total) : "—"}</td>
+                          <td className="num">
+                            {r.s ? qty(r.s.quantity) : "—"}
+                          </td>
+                          <td className="num">
+                            {r.s ? money(r.s.gross_total) : "—"}
+                          </td>
                           <td className="num">{r.days ?? "—"}</td>
-                          <td className="num">{r.rent ? money(r.rent) : "—"}</td>
-                          <td className={`num ${r.margin > 0 ? "due-in" : r.margin < 0 ? "due-out" : ""}`}>
+                          <td className="num">
+                            {r.rent ? money(r.rent) : "—"}
+                          </td>
+                          <td
+                            className={`num ${r.margin > 0 ? "due-in" : r.margin < 0 ? "due-out" : ""}`}
+                          >
                             {r.margin === null ? "—" : money(r.margin)}
                           </td>
                           <td>
-                            <span className={`status-pill ${r.status === "Sold" ? "sold" : r.status === "Pending" ? "pending" : "orphan"}`}>
-                              {r.status === "No purchase" ? "No purchase found" : r.status}
+                            <span
+                              className={`status-pill ${r.status === "Sold" ? "sold" : r.status === "Pending" ? "pending" : "orphan"}`}
+                            >
+                              {r.status === "No purchase"
+                                ? "No purchase found"
+                                : r.status}
                             </span>
                           </td>
                         </tr>
                       ))}
                     </tbody>
-
                   </table>
 
                   {!tracking.rows.length && (
                     <p className="muted pad">No records found.</p>
                   )}
-
                 </div>
-
               )}
 
               {!summaryFirstLoad && (
                 <div className="totals-bar">
-
                   <div className="totals-label">
                     {trackFiltered ? "Filtered totals" : "Totals"}
-                    <small>{tracking.rows.length} records · {tracking.totals.pending} pending</small>
+                    <small>
+                      {tracking.rows.length} records · {tracking.totals.pending}{" "}
+                      pending
+                    </small>
                   </div>
 
                   <div className="totals-items">
@@ -1785,20 +2213,14 @@ const api = useCallback(
                       <b>{money(tracking.totals.margin)}</b>
                     </div>
                   </div>
-
                 </div>
               )}
-
             </div>
-
           ) : page === RENT ? (
-
             /* VEHICLE RENT */
 
             <div className="panel fill">
-
               <div className="table-toolbar">
-
                 <div>
                   <h3>Vehicle rent</h3>
 
@@ -1812,11 +2234,9 @@ const api = useCallback(
                 </div>
 
                 {exportButtons}
-
               </div>
 
               <div className="filter-bar">
-
                 <label>
                   Purchase company
                   <select
@@ -1825,7 +2245,9 @@ const api = useCallback(
                   >
                     <option value="">All companies</option>
                     {companies.map((c) => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
                     ))}
                   </select>
                 </label>
@@ -1838,7 +2260,9 @@ const api = useCallback(
                   >
                     <option value="">All accounts</option>
                     {rentView.accounts.map((a) => (
-                      <option key={a} value={a}>{a}</option>
+                      <option key={a} value={a}>
+                        {a}
+                      </option>
                     ))}
                   </select>
                 </label>
@@ -1892,39 +2316,72 @@ const api = useCallback(
                     Clear filters
                   </button>
                 )}
-
               </div>
 
               {rentsList.loading && !rentsList.loaded ? (
-
                 <p className="muted pad">Loading records...</p>
-
               ) : (
-
                 <div className="table-wrap">
-
                   <table className="summary-table">
-
                     <thead>
                       <tr>
-                        <th>
-                          <button
-                            type="button"
-                            className="sort-btn"
-                            onClick={() => setRDesc(!rDesc)}
-                            title={rDesc ? "Newest first — click for oldest first" : "Oldest first — click for newest first"}
-                          >
-                            Purchase date
-                            {rDesc ? <ArrowDown size={13} /> : <ArrowUp size={13} />}
-                          </button>
-                        </th>
-                        <th>Purchase company</th>
-                        <th>Vehicle</th>
-                        <th>Paid date</th>
-                        <th className="num">Rent amount</th>
-                        <th>Account name</th>
-                        <th>Status</th>
-                        <th title="Whether this rent was matched to a purchase, so it is deducted from the margin">Purchase link</th>
+                        <SortTh
+                          label="Purchase date"
+                          k="entry_date"
+                          kind="date"
+                          sort={rSort}
+                          onSort={sortR}
+                        />
+                        <SortTh
+                          label="Purchase company"
+                          k="company"
+                          kind="text"
+                          sort={rSort}
+                          onSort={sortR}
+                        />
+                        <SortTh
+                          label="Vehicle"
+                          k="vehicle_number"
+                          kind="text"
+                          sort={rSort}
+                          onSort={sortR}
+                        />
+                        <SortTh
+                          label="Paid date"
+                          k="paid_date"
+                          kind="date"
+                          sort={rSort}
+                          onSort={sortR}
+                        />
+                        <SortTh
+                          label="Rent amount"
+                          k="amount"
+                          kind="num"
+                          right
+                          sort={rSort}
+                          onSort={sortR}
+                        />
+                        <SortTh
+                          label="Account name"
+                          k="account_name"
+                          kind="text"
+                          sort={rSort}
+                          onSort={sortR}
+                        />
+                        <SortTh
+                          label="Status"
+                          k="status"
+                          kind="text"
+                          sort={rSort}
+                          onSort={sortR}
+                        />
+                        <SortTh
+                          label="Purchase link"
+                          k="link"
+                          kind="text"
+                          sort={rSort}
+                          onSort={sortR}
+                        />
                         <th>Actions</th>
                       </tr>
                     </thead>
@@ -1934,25 +2391,32 @@ const api = useCallback(
                         <tr key={r.id}>
                           <td>{dayOf(r.entry_date) || "—"}</td>
                           <td>{companyMap[r.company_id] || "—"}</td>
-                          <td><b>{r.vehicle_number || "—"}</b></td>
+                          <td>
+                            <b>{r.vehicle_number || "—"}</b>
+                          </td>
                           <td>{r.paid_date ? dayOf(r.paid_date) : "—"}</td>
                           <td className="num">
-                            {r.amount == null || r.amount === "" ? "—" : money(r.amount)}
+                            {r.amount == null || r.amount === ""
+                              ? "—"
+                              : money(r.amount)}
                           </td>
                           <td>{r.account_name || "—"}</td>
                           <td>
-                            <span className={`status-pill ${r.paid_date ? "sold" : "pending"}`}>
+                            <span
+                              className={`status-pill ${r.paid_date ? "sold" : "pending"}`}
+                            >
                               {r.paid_date ? "Paid" : "Unpaid"}
                             </span>
                           </td>
                           <td>
-                            <span className={`status-pill ${r.isLinked ? "sold" : "orphan"}`}>
+                            <span
+                              className={`status-pill ${r.isLinked ? "sold" : "orphan"}`}
+                            >
                               {r.isLinked ? "Linked" : "No purchase found"}
                             </span>
                           </td>
                           <td>
                             <div className="row-actions">
-
                               <button
                                 onClick={() => {
                                   setEditing(r);
@@ -1970,13 +2434,11 @@ const api = useCallback(
                               >
                                 <Trash2 size={16} />
                               </button>
-
                             </div>
                           </td>
                         </tr>
                       ))}
                     </tbody>
-
                   </table>
 
                   {!rentView.rows.length && (
@@ -1986,17 +2448,17 @@ const api = useCallback(
                         : "No rent records yet. Use Add Vehicle rent to create one."}
                     </p>
                   )}
-
                 </div>
-
               )}
 
               {!(rentsList.loading && !rentsList.loaded) && (
                 <div className="totals-bar">
-
                   <div className="totals-label">
                     {rentFiltered ? "Filtered totals" : "Totals"}
-                    <small>{rentView.rows.length} records · {rentView.totals.unpaidCount} unpaid</small>
+                    <small>
+                      {rentView.rows.length} records ·{" "}
+                      {rentView.totals.unpaidCount} unpaid
+                    </small>
                   </div>
 
                   <div className="totals-items">
@@ -2017,35 +2479,28 @@ const api = useCallback(
                       <b>{rentView.totals.unlinked}</b>
                     </div>
                   </div>
-
                 </div>
               )}
-
             </div>
-
           ) : page === SUMMARY ? (
-
             /* COMPANY SUMMARY */
 
             <div className="panel fill">
-
               <div className="table-toolbar">
-
                 <div>
                   <h3>Company summary</h3>
 
                   <p className="muted">
-                    {summary.rows.length} companies · purchases, sales, payments and dues
+                    {summary.rows.length} companies · purchases, sales, payments
+                    and dues
                     {summaryLoading && !summaryFirstLoad && " · refreshing…"}
                   </p>
                 </div>
 
                 {exportButtons}
-
               </div>
 
               <div className="filter-bar">
-
                 <label>
                   Company
                   <select
@@ -2054,7 +2509,9 @@ const api = useCallback(
                   >
                     <option value="">All companies</option>
                     {companies.map((c) => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
                     ))}
                   </select>
                 </label>
@@ -2093,47 +2550,124 @@ const api = useCallback(
                     Clear filters
                   </button>
                 )}
-
               </div>
 
               {summaryFirstLoad ? (
-
                 <p className="muted pad">Loading records...</p>
-
               ) : (
-
                 <div className="table-wrap">
-
                   <table className="summary-table">
-
                     <thead>
                       <tr>
-                        <th>Company</th>
-                        <th className="num">Purchase qty (qtl)</th>
-                        <th className="num">Purchase total</th>
-                        <th className="num">Paid</th>
-                        <th className="num">Payable due</th>
-                        <th className="num">Sales qty (qtl)</th>
-                        <th className="num">Sales total</th>
-                        <th className="num">Received</th>
-                        <th className="num">Receivable due</th>
-                        <th className="num">Net balance</th>
+                        <SortTh
+                          label="Company"
+                          k="name"
+                          kind="text"
+                          sort={sSort}
+                          onSort={sortS}
+                        />
+                        <SortTh
+                          label="Purchase qty (qtl)"
+                          k="pQty"
+                          kind="num"
+                          right
+                          sort={sSort}
+                          onSort={sortS}
+                        />
+                        <SortTh
+                          label="Purchase total"
+                          k="pTotal"
+                          kind="num"
+                          right
+                          sort={sSort}
+                          onSort={sortS}
+                        />
+                        <SortTh
+                          label="Paid"
+                          k="paid"
+                          kind="num"
+                          right
+                          sort={sSort}
+                          onSort={sortS}
+                        />
+                        <SortTh
+                          label="Payable due"
+                          k="payable"
+                          kind="num"
+                          right
+                          sort={sSort}
+                          onSort={sortS}
+                        />
+                        <SortTh
+                          label="Sales qty (qtl)"
+                          k="sQty"
+                          kind="num"
+                          right
+                          sort={sSort}
+                          onSort={sortS}
+                        />
+                        <SortTh
+                          label="Sales total"
+                          k="sTotal"
+                          kind="num"
+                          right
+                          sort={sSort}
+                          onSort={sortS}
+                        />
+                        <SortTh
+                          label="Received"
+                          k="received"
+                          kind="num"
+                          right
+                          sort={sSort}
+                          onSort={sortS}
+                        />
+                        <SortTh
+                          label="Receivable due"
+                          k="receivable"
+                          kind="num"
+                          right
+                          sort={sSort}
+                          onSort={sortS}
+                        />
+                        <SortTh
+                          label="Net balance"
+                          k="net"
+                          kind="num"
+                          right
+                          sort={sSort}
+                          onSort={sortS}
+                        />
                       </tr>
                     </thead>
 
                     <tbody>
                       {summary.rows.map((c) => (
                         <tr key={c.id}>
-                          <td><b>{c.name}</b></td>
+                          <td>
+                            <b>{c.name}</b>
+                          </td>
                           <td className="num">{qty(c.pQty)}</td>
                           <td className="num">{money(c.pTotal)}</td>
                           <td className="num">{money(c.paid)}</td>
-                          <td className={`num ${c.payable > 0 ? "due-out" : ""}`}>{money(c.payable)}</td>
+                          <td
+                            className={`num ${c.payable > 0 ? "due-out" : ""}`}
+                          >
+                            {money(c.payable)}
+                          </td>
                           <td className="num">{qty(c.sQty)}</td>
                           <td className="num">{money(c.sTotal)}</td>
                           <td className="num">{money(c.received)}</td>
-                          <td className={`num ${c.receivable > 0 ? "due-in" : ""}`}>{money(c.receivable)}</td>
-                          <td className={`num ${c.net > 0 ? "due-in" : c.net < 0 ? "due-out" : ""}`}>{money(c.net)}</td>
+                          <td
+                            className={`num ${c.receivable > 0 ? "due-in" : ""}`}
+                          >
+                            {money(c.receivable)}
+                          </td>
+                          <td
+                            className={`num ${c.net > 0 ? "due-in" : c.net < 0 ? "due-out" : ""}`}
+                          >
+                            {money(c.net)}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -2143,33 +2677,41 @@ const api = useCallback(
                         <tr>
                           <td>Total</td>
                           <td className="num">{qty(summary.totals.pQty)}</td>
-                          <td className="num">{money(summary.totals.pTotal)}</td>
+                          <td className="num">
+                            {money(summary.totals.pTotal)}
+                          </td>
                           <td className="num">{money(summary.totals.paid)}</td>
-                          <td className="num">{money(summary.totals.payable)}</td>
+                          <td className="num">
+                            {money(summary.totals.payable)}
+                          </td>
                           <td className="num">{qty(summary.totals.sQty)}</td>
-                          <td className="num">{money(summary.totals.sTotal)}</td>
-                          <td className="num">{money(summary.totals.received)}</td>
-                          <td className="num">{money(summary.totals.receivable)}</td>
+                          <td className="num">
+                            {money(summary.totals.sTotal)}
+                          </td>
+                          <td className="num">
+                            {money(summary.totals.received)}
+                          </td>
+                          <td className="num">
+                            {money(summary.totals.receivable)}
+                          </td>
                           <td className="num">{money(summary.totals.net)}</td>
                         </tr>
                       </tfoot>
                     )}
-
                   </table>
 
                   {!summary.rows.length && (
                     <p className="muted pad">No records found.</p>
                   )}
-
                 </div>
-
               )}
 
               {!summaryFirstLoad && (
                 <div className="totals-bar">
-
                   <div className="totals-label">
-                    {sCompany || sFrom || sTo || search ? "Filtered totals" : "Totals"}
+                    {sCompany || sFrom || sTo || search
+                      ? "Filtered totals"
+                      : "Totals"}
                     <small>{summary.rows.length} companies</small>
                   </div>
 
@@ -2195,47 +2737,46 @@ const api = useCallback(
                       <b>{money(summary.totals.net)}</b>
                     </div>
                   </div>
-
                 </div>
               )}
-
             </div>
-
-          ) : ( /* DATA TABLE */
+          ) : (
+            /* DATA TABLE */
 
             <div className="panel fill">
-
               <div className="table-toolbar">
-
                 <div>
                   <h3>{page} register</h3>
 
                   <p className="muted">
                     {filtered.length} of {rows.length} records
-                    {hasFilters && sortDir === "desc"
-                      ? " · newest first"
-                      : hasFilters
-                      ? " · oldest first"
-                      : ""}
-                    
+                    {dataSort.key &&
+                      ` · sorted by ${(titleMap[dataSort.key] || dataSort.key.replaceAll("_", " ")).toLowerCase()} (${dataSort.dir === "asc" ? "low to high" : "high to low"})`}
                     {refreshing && " · refreshing…"}
                   </p>
                 </div>
 
-              {hasFilters && (
+                {hasFilters && (
                   <div className="filter-bar">
-
                     <label>
                       Company
                       <select
                         value={filters.company}
                         onChange={(e) =>
-                          dispatch(setFilter({ page, key: "company", value: e.target.value }))
+                          dispatch(
+                            setFilter({
+                              page,
+                              key: "company",
+                              value: e.target.value,
+                            }),
+                          )
                         }
                       >
                         <option value="">All companies</option>
                         {companies.map((c) => (
-                          <option key={c.id} value={c.id}>{c.name}</option>
+                          <option key={c.id} value={c.id}>
+                            {c.name}
+                          </option>
                         ))}
                       </select>
                     </label>
@@ -2247,7 +2788,13 @@ const api = useCallback(
                         value={filters.from}
                         max={filters.to || undefined}
                         onChange={(e) =>
-                          dispatch(setFilter({ page, key: "from", value: e.target.value }))
+                          dispatch(
+                            setFilter({
+                              page,
+                              key: "from",
+                              value: e.target.value,
+                            }),
+                          )
                         }
                       />
                     </label>
@@ -2259,7 +2806,13 @@ const api = useCallback(
                         value={filters.to}
                         min={filters.from || undefined}
                         onChange={(e) =>
-                          dispatch(setFilter({ page, key: "to", value: e.target.value }))
+                          dispatch(
+                            setFilter({
+                              page,
+                              key: "to",
+                              value: e.target.value,
+                            }),
+                          )
                         }
                       />
                     </label>
@@ -2270,7 +2823,13 @@ const api = useCallback(
                         <select
                           value={filters.direction}
                           onChange={(e) =>
-                            dispatch(setFilter({ page, key: "direction", value: e.target.value }))
+                            dispatch(
+                              setFilter({
+                                page,
+                                key: "direction",
+                                value: e.target.value,
+                              }),
+                            )
                           }
                         >
                           <option value="">All</option>
@@ -2290,68 +2849,49 @@ const api = useCallback(
                         Clear filters ({activeFilterCount})
                       </button>
                     )}
-
                   </div>
                 )}
 
                 {hasFilters && exportButtons}
-
               </div>
 
               {firstLoad ? (
-
-                <p className="muted pad">
-                  Loading records...
-                </p>
-
+                <p className="muted pad">Loading records...</p>
               ) : (
-
                 <div className="table-wrap">
-
                   <table>
-
                     <thead>
                       <tr>
-
                         {columns[page].map((key) => (
-                          <th key={key}>
-                            {key === dateKey ? (
-                              <button
-                                type="button"
-                                className="sort-btn"
-                                onClick={() => dispatch(toggleSort(page))}
-                                title={sortDir === "desc" ? "Newest first — click for oldest first" : "Oldest first — click for newest first"}
-                              >
-                                {titleMap[key] || key}
-                                {sortDir === "desc" ? <ArrowDown size={13} /> : <ArrowUp size={13} />}
-                              </button>
-                            ) : (
-                              titleMap[key] || key.replaceAll("_", " ")
-                            )}
-                          </th>
+                          <SortTh
+                            key={key}
+                            label={titleMap[key] || key.replaceAll("_", " ")}
+                            k={key}
+                            kind={
+                              NUMERIC_KEYS.includes(key)
+                                ? "num"
+                                : DATE_KEYS.includes(key)
+                                  ? "date"
+                                  : "text"
+                            }
+                            sort={dataSort}
+                            onSort={sortData}
+                          />
                         ))}
 
                         <th>Actions</th>
-
                       </tr>
                     </thead>
 
                     <tbody>
-
                       {filtered.map((record) => (
-
                         <tr key={record.id}>
-
                           {columns[page].map((key) => (
-                            <td key={key}>
-                              {display(key, record[key])}
-                            </td>
+                            <td key={key}>{display(key, record[key])}</td>
                           ))}
 
                           <td>
-
                             <div className="row-actions">
-
                               <button
                                 onClick={() => {
                                   setEditing(record);
@@ -2369,39 +2909,33 @@ const api = useCallback(
                               >
                                 <Trash2 size={16} />
                               </button>
-
                             </div>
-
                           </td>
-
                         </tr>
-
                       ))}
-
                     </tbody>
-
                   </table>
 
                   {!filtered.length && (
                     <p className="muted pad">
-                      {rows.length && activeFilterCount ? "No records match these filters." : "No records found."}
+                      {rows.length && activeFilterCount
+                        ? "No records match these filters."
+                        : "No records found."}
                     </p>
                   )}
-
                 </div>
-
               )}
 
               {hasFilters && !firstLoad && (
                 <div className="totals-bar">
-
                   <div className="totals-label">
-                    {activeFilterCount > 0 || search ? "Filtered totals" : "Totals"}
+                    {activeFilterCount > 0 || search
+                      ? "Filtered totals"
+                      : "Totals"}
                     <small>{filtered.length} records</small>
                   </div>
 
                   <div className="totals-items">
-
                     {page === "Payments" ? (
                       <>
                         <div>
@@ -2424,42 +2958,33 @@ const api = useCallback(
                           <b>{qty(totals.quantity)} qtl</b>
                         </div>
                         <div>
-                          <span>{page === "Sales" ? "Total sales" : "Total purchases"}</span>
+                          <span>
+                            {page === "Sales"
+                              ? "Total sales"
+                              : "Total purchases"}
+                          </span>
                           <b>{money(totals.amount)}</b>
                         </div>
                       </>
                     )}
-
                   </div>
-
                 </div>
               )}
-
             </div>
-
           )}
-
         </section>
-
       </main>
 
       {/* ADD / EDIT MODAL */}
 
       {modal && (
-
-        <div
-          className="modal-backdrop"
-          onClick={() => setModal(false)}
-        >
-
+        <div className="modal-backdrop" onClick={() => setModal(false)}>
           <form
             className="modal"
             onSubmit={save}
             onClick={(event) => event.stopPropagation()}
           >
-
             <div className="modal-head">
-
               <div>
                 <p className="eyebrow">RECORD MANAGEMENT</p>
 
@@ -2475,95 +3000,65 @@ const api = useCallback(
               >
                 ✕
               </button>
-
             </div>
 
             <div className="form-grid">
+              {fields[dataPage].map(([key, label, type, required]) => (
+                <label
+                  key={key}
+                  className={type === "text" && key === "notes" ? "wide" : ""}
+                >
+                  {label}
 
-              {fields[dataPage].map(
-                ([key, label, type, required]) => (
+                  {type === "company" ? (
+                    <select
+                      name={key}
+                      defaultValue={editing?.[key] || ""}
+                      required={required}
+                    >
+                      <option value="">Select company</option>
 
-                  <label
-                    key={key}
-                    className={
-                      type === "text" && key === "notes"
-                        ? "wide"
-                        : ""
-                    }
-                  >
-
-                    {label}
-
-                    {type === "company" ? (
-
-                      <select
-                        name={key}
-                        defaultValue={editing?.[key] || ""}
-                        required={required}
-                      >
-
-                        <option value="">
-                          Select company
+                      {companies.map((company) => (
+                        <option value={company.id} key={company.id}>
+                          {company.name}
                         </option>
-
-                        {companies.map((company) => (
-                          <option
-                            value={company.id}
-                            key={company.id}
-                          >
-                            {company.name}
-                          </option>
-                        ))}
-
-                      </select>
-
-                    ) : type === "select" ? (
-
-                      <select
-                        name={key}
-                        defaultValue={
-                          editing?.[key] ||
-                          (key === "company_type"
-                            ? "Both"
-                            : "received")
-                        }
-                        required={required}
-                      >
-
-                        {(key === "company_type"
-                          ? ["Customer", "Supplier", "Both"]
-                          : ["received", "paid"]
-                        ).map((value) => (
-
-                          <option key={value} value={value}>
-                            {value}
-                          </option>
-
-                        ))}
-
-                      </select>
-
-                    ) : (
-
-                      <input
-                        name={key}
-                        type={type}
-                        step={type === "number" ? "any" : undefined}
-                        defaultValue={
-                          editing?.[key] ??
-                          (type === "date" && key !== "paid_date" ? today() : "")
-                        }
-                        required={required}
-                        list={key === "account_name" ? "account-names" : undefined}
-                      />
-
-                    )}
-
-                  </label>
-
-                )
-              )}
-
+                      ))}
+                    </select>
+                  ) : type === "select" ? (
+                    <select
+                      name={key}
+                      defaultValue={
+                        editing?.[key] ||
+                        (key === "company_type" ? "Both" : "received")
+                      }
+                      required={required}
+                    >
+                      {(key === "company_type"
+                        ? ["Customer", "Supplier", "Both"]
+                        : ["received", "paid"]
+                      ).map((value) => (
+                        <option key={value} value={value}>
+                          {value}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      name={key}
+                      type={type}
+                      step={type === "number" ? "any" : undefined}
+                      defaultValue={
+                        editing?.[key] ??
+                        (type === "date" && key !== "paid_date" ? today() : "")
+                      }
+                      required={required}
+                      list={
+                        key === "account_name" ? "account-names" : undefined
+                      }
+                    />
+                  )}
+                </label>
+              ))}
             </div>
 
             {dataPage === "Rents" && (
@@ -2575,7 +3070,6 @@ const api = useCallback(
             )}
 
             <div className="modal-actions">
-
               <button
                 type="button"
                 className="secondary"
@@ -2587,21 +3081,13 @@ const api = useCallback(
                 Cancel
               </button>
 
-              <button
-                className="primary"
-                disabled={busy}
-              >
+              <button className="primary" disabled={busy}>
                 {busy ? "Saving..." : "Save record"}
               </button>
-
             </div>
-
           </form>
-
         </div>
-
       )}
-
     </div>
   );
 }

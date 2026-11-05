@@ -10,24 +10,19 @@ const app = express();
 // 1. ENVIRONMENT CONFIGURATION
 // ==========================================
 
-const requiredEnv = [
-  "SUPABASE_URL",
-  "SUPABASE_ANON_KEY",
-];
+const requiredEnv = ["SUPABASE_URL", "SUPABASE_ANON_KEY"];
 
 const missingEnv = requiredEnv.filter((key) => !process.env[key]);
 
 if (missingEnv.length) {
   console.error(
     `FATAL: Missing environment variable(s): ${missingEnv.join(", ")}.\n` +
-      "Set them in Render > your service > Environment, then redeploy."
+      "Set them in Render > your service > Environment, then redeploy.",
   );
   process.exit(1);
 }
 
-const allowedOrigins = (
-  process.env.CLIENT_ORIGIN || "http://localhost:5173"
-)
+const allowedOrigins = (process.env.CLIENT_ORIGIN || "http://localhost:5173")
   .split(",")
   .map((origin) => origin.trim().replace(/\/+$/, ""))
   .filter(Boolean);
@@ -41,10 +36,7 @@ app.use(helmet());
 app.use(
   cors({
     origin(origin, callback) {
-      if (
-        !origin ||
-        allowedOrigins.includes(origin.replace(/\/+$/, ""))
-      ) {
+      if (!origin || allowedOrigins.includes(origin.replace(/\/+$/, ""))) {
         return callback(null, true);
       }
 
@@ -53,7 +45,7 @@ app.use(
     },
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
-  })
+  }),
 );
 
 app.use(express.json({ limit: "1mb" }));
@@ -83,9 +75,7 @@ app.get("/health", (_req, res) => {
 
 async function requireAuth(req, res, next) {
   try {
-    const token = req.headers.authorization?.match(
-      /^Bearer\s+(.+)$/i
-    )?.[1];
+    const token = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
 
     if (!token) {
       return res.status(401).json({
@@ -110,7 +100,7 @@ async function requireAuth(req, res, next) {
           persistSession: false,
           detectSessionInUrl: false,
         },
-      }
+      },
     );
 
     const {
@@ -140,6 +130,9 @@ async function requireAuth(req, res, next) {
 // Protect all API routes.
 app.use("/api", requireAuth);
 
+// Businesses shown as folders in the sidebar.
+const BUSINESSES = ["DDGS", "Maize and Turmeric"];
+
 // ==========================================
 // 5. DATABASE RESOURCE CONFIGURATION
 // ==========================================
@@ -160,6 +153,7 @@ const resources = {
 
   purchases: {
     table: "purchases",
+    scoped: true,
     fields: [
       "company_id",
       "entry_date",
@@ -176,6 +170,7 @@ const resources = {
 
   sales: {
     table: "sales",
+    scoped: true,
     fields: [
       "company_id",
       "entry_date",
@@ -194,6 +189,7 @@ const resources = {
 
   payments: {
     table: "payments",
+    scoped: true,
     fields: [
       "company_id",
       "payment_date",
@@ -208,6 +204,7 @@ const resources = {
   // Exposed as /api/rents
   rents: {
     table: "vehicle_rents",
+    scoped: true,
     fields: [
       "company_id",
       "entry_date",
@@ -232,7 +229,7 @@ function getPayload(fields, body) {
   return Object.fromEntries(
     fields
       .filter((field) => body[field] !== undefined)
-      .map((field) => [field, body[field]])
+      .map((field) => [field, body[field]]),
   );
 }
 
@@ -252,10 +249,18 @@ for (const [key, config] of Object.entries(resources)) {
         .order("created_at", { ascending: false })
         .limit(500);
 
+      // purchases / sales / payments / rents belong to one business
+      if (config.scoped && req.query.business) {
+        if (!BUSINESSES.includes(req.query.business)) {
+          return res.status(400).json({ error: "Unknown business" });
+        }
+        query = query.eq("business", req.query.business);
+      }
+
       if (key === "companies" && req.query.search) {
         query = query.ilike(
           "name",
-          `%${String(req.query.search).slice(0, 100)}%`
+          `%${String(req.query.search).slice(0, 100)}%`,
         );
       }
 
@@ -286,6 +291,16 @@ for (const [key, config] of Object.entries(resources)) {
 
       // Never trust owner_id supplied by the frontend.
       payload.owner_id = req.user.id;
+
+      if (config.scoped) {
+        const business = req.body?.business || "DDGS";
+
+        if (!BUSINESSES.includes(business)) {
+          return res.status(400).json({ error: "Unknown business" });
+        }
+
+        payload.business = business;
+      }
 
       const { data, error } = await req.supabase
         .from(table)
@@ -371,28 +386,29 @@ app.get("/api/dashboard", async (req, res) => {
   try {
     const db = req.supabase;
 
+    // optional ?business= limits the totals to one business
+    const business = req.query.business;
+
+    if (business && !BUSINESSES.includes(business)) {
+      return res.status(400).json({ error: "Unknown business" });
+    }
+
+    const scope = (query) =>
+      business ? query.eq("business", business) : query;
+
     const [p, s, received, paid] = await Promise.all([
-      db.from("purchases").select("purchase_total"),
+      scope(db.from("purchases").select("purchase_total")),
 
-      db.from("sales").select("gross_total"),
+      scope(db.from("sales").select("gross_total")),
 
-      db
-        .from("payments")
-        .select("amount")
-        .eq("direction", "received"),
+      scope(db.from("payments").select("amount").eq("direction", "received")),
 
-      db
-        .from("payments")
-        .select("amount")
-        .eq("direction", "paid"),
+      scope(db.from("payments").select("amount").eq("direction", "paid")),
     ]);
 
-    const errors = [
-      p.error,
-      s.error,
-      received.error,
-      paid.error,
-    ].filter(Boolean);
+    const errors = [p.error, s.error, received.error, paid.error].filter(
+      Boolean,
+    );
 
     if (errors.length) {
       console.error("Dashboard error:", errors[0].message);
@@ -403,10 +419,7 @@ app.get("/api/dashboard", async (req, res) => {
     }
 
     const sum = (rows, key) =>
-      (rows || []).reduce(
-        (total, row) => total + Number(row[key] || 0),
-        0
-      );
+      (rows || []).reduce((total, row) => total + Number(row[key] || 0), 0);
 
     const sales = sum(s.data, "gross_total");
     const purchases = sum(p.data, "purchase_total");
