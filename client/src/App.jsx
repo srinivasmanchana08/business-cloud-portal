@@ -31,6 +31,7 @@ import {
   Scale,
   Truck,
   Banknote,
+  BookOpen,
   Folder,
   FolderOpen,
   ChevronDown,
@@ -86,6 +87,7 @@ const folders = [
       ["Purchases", ShoppingCart],
       ["Sales", Receipt],
       ["Payments", Wallet],
+      ["Ledger", BookOpen],
       ["Company Summary", Scale],
       ["Vehicle Tracking", Truck],
       ["Vehicle Rent", Banknote],
@@ -97,12 +99,19 @@ const folders = [
       ["Purchases", ShoppingCart],
       ["Sales", Receipt],
       ["Payments", Wallet],
+      ["Ledger", BookOpen],
       ["Company Summary", Scale],
       ["Vehicle Tracking", Truck],
       ["Vehicle Rent", Banknote],
     ],
   },
 ];
+
+// Sidebar is always listed A to Z (pages inside each folder too)
+const byName = (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" });
+nav.sort(([a], [b]) => byName(a, b));
+folders.sort((a, b) => byName(a.name, b.name));
+folders.forEach((f) => f.items.sort(([a], [b]) => byName(a, b)));
 
 // =====================================================
 // 4. HELPERS
@@ -139,6 +148,7 @@ const TOTAL_KEY = {
 };
 
 const SUMMARY = "Company Summary";
+const LEDGER = "Ledger";
 const TRACK = "Vehicle Tracking";
 const RENT = "Vehicle Rent";
 
@@ -386,6 +396,14 @@ export default function App() {
 
   // Company Summary + generic table sorting
   const [sSort, setSSort] = useState({ key: "name", dir: "asc" });
+
+  // Ledger filters + sort
+  const [lCompany, setLCompany] = useState("");
+  const [lType, setLType] = useState("");
+  const [lFrom, setLFrom] = useState("");
+  const [lTo, setLTo] = useState("");
+  const [lSort, setLSort] = useState({ key: "date", dir: "desc" });
+  const sortL = (k, d) => setLSort((c) => nextSort(c, k, d));
   const [dataSorts, setDataSorts] = useState({});
   const dataSort = dataSorts[page] || DEFAULT_SORT[page] || NO_SORT;
 
@@ -548,7 +566,7 @@ export default function App() {
         ["Rents", "Purchases"].forEach((p) =>
           dispatch(fetchList({ api, page: p, force, business: biz })),
         );
-      } else if (page === SUMMARY) {
+      } else if (page === SUMMARY || page === LEDGER) {
         ["Purchases", "Sales", "Payments"].forEach((p) =>
           dispatch(fetchList({ api, page: p, force, business: biz })),
         );
@@ -1012,6 +1030,122 @@ export default function App() {
   );
 
   // ===================================================
+  // 10c-3. LEDGER (purchases + sales + payments together)
+  // ===================================================
+
+  const ledgerView = useMemo(() => {
+    const all = [
+      ...purchasesList.items.map((p) => ({
+        id: `P-${p.id}`,
+        kind: "Purchase",
+        date: p.entry_date,
+        company_id: p.company_id,
+        vehicle: p.vehicle_number,
+        ref: p.voucher_no,
+        qty: Number(p.quantity || 0),
+        amount: Number(p.purchase_total || 0),
+        created_at: p.created_at,
+      })),
+      ...salesList.items.map((x) => ({
+        id: `S-${x.id}`,
+        kind: "Sale",
+        date: x.entry_date,
+        company_id: x.company_id,
+        vehicle: x.vehicle_number,
+        ref: x.voucher_no,
+        qty: Number(x.quantity || 0),
+        amount: Number(x.gross_total || 0),
+        created_at: x.created_at,
+      })),
+      ...paymentsList.items.map((x) => ({
+        id: `M-${x.id}`,
+        kind: x.direction === "paid" ? "Paid" : "Received",
+        date: x.payment_date,
+        company_id: x.company_id,
+        vehicle: "",
+        ref: x.reference,
+        qty: null,
+        amount: Number(x.amount || 0),
+        created_at: x.created_at,
+      })),
+    ].map((r) => ({ ...r, company: companyMap[r.company_id] || "" }));
+
+    const q = search.trim().toLowerCase();
+
+    const filteredRows = all.filter((r) => {
+      const d = dayOf(r.date);
+
+      if (lCompany && r.company_id !== lCompany) return false;
+      if (lType && r.kind !== lType) return false;
+      if (lFrom && d < lFrom) return false;
+      if (lTo && d > lTo) return false;
+
+      if (q) {
+        const text =
+          `${r.company} ${r.vehicle || ""} ${r.ref || ""}`.toLowerCase();
+        if (!text.includes(q)) return false;
+      }
+
+      return true;
+    });
+
+    const getters = {
+      date: (r) => dayOf(r.date),
+      kind: (r) => r.kind,
+      company: (r) => r.company,
+      vehicle: (r) => r.vehicle,
+      ref: (r) => r.ref,
+      qty: (r) => r.qty,
+      amount: (r) => r.amount,
+    };
+
+    const rows = sortRows(filteredRows, getters[lSort.key], lSort, byCreated);
+
+    const totals = {
+      pQty: 0,
+      sQty: 0,
+      purchases: 0,
+      sales: 0,
+      paid: 0,
+      received: 0,
+    };
+
+    filteredRows.forEach((r) => {
+      if (r.kind === "Purchase") {
+        totals.pQty += r.qty;
+        totals.purchases += r.amount;
+      } else if (r.kind === "Sale") {
+        totals.sQty += r.qty;
+        totals.sales += r.amount;
+      } else if (r.kind === "Paid") {
+        totals.paid += r.amount;
+      } else {
+        totals.received += r.amount;
+      }
+    });
+
+    totals.payable = totals.purchases - totals.paid;
+    totals.receivable = totals.sales - totals.received;
+    // positive = you still have to receive more than you have to pay
+    totals.balance = totals.receivable - totals.payable;
+
+    return { rows, totals, all: all.length };
+  }, [
+    purchasesList,
+    salesList,
+    paymentsList,
+    companyMap,
+    lCompany,
+    lType,
+    lFrom,
+    lTo,
+    lSort,
+    search,
+  ]);
+
+  const ledgerFiltered = Boolean(lCompany || lType || lFrom || lTo || search);
+
+  // ===================================================
   // 10d. EXPORT (Excel / PDF) — exports exactly what is on screen
   // ===================================================
 
@@ -1095,6 +1229,60 @@ export default function App() {
           t.rent,
           t.margin,
           `${t.pending} pending`,
+        ],
+      };
+    }
+
+    // ---- Ledger
+    if (page === LEDGER) {
+      const parts = [];
+      if (lCompany) parts.push(`Company: ${name(lCompany)}`);
+      if (lType)
+        parts.push(
+          `Type: ${lType === "Paid" ? "Payment paid" : lType === "Received" ? "Payment received" : lType}`,
+        );
+      if (lFrom) parts.push(`From ${lFrom}`);
+      if (lTo) parts.push(`To ${lTo}`);
+      if (search) parts.push(`Search: ${search}`);
+
+      const t = ledgerView.totals;
+
+      return {
+        title: "Ledger",
+        filterText: parts.join(", "),
+        headers: [
+          "Date",
+          "Type",
+          "Company",
+          "Vehicle",
+          "Voucher / reference",
+          "Qty (qtl)",
+          "Total",
+        ],
+        kinds: [null, null, null, null, null, "qty", "money"],
+        rows: ledgerView.rows.map((r) => [
+          day(r.date),
+          r.kind === "Paid"
+            ? "Payment paid"
+            : r.kind === "Received"
+              ? "Payment received"
+              : r.kind,
+          r.company,
+          r.vehicle || "",
+          r.ref || "",
+          r.qty,
+          r.amount,
+        ]),
+        summary: [
+          ["Purchase qty (qtl)", t.pQty, "qty"],
+          ["Sale qty (qtl)", t.sQty, "qty"],
+          ["Total purchases", t.purchases, "money"],
+          ["Total sales", t.sales, "money"],
+          ["Total paid", t.paid, "money"],
+          ["Total received", t.received, "money"],
+          ["To pay (purchases - paid)", t.payable, "money"],
+          ["To receive (sales - received)", t.receivable, "money"],
+          ["Remaining balance", t.balance, "money"],
         ],
       };
     }
@@ -1680,11 +1868,11 @@ export default function App() {
 
       <aside className={`sidebar ${mobile ? "open" : ""}`}>
         <div className="brand">
-          <div className="brand-mark">MS</div>
+          <div className="brand-mark">BC</div>
 
           <div>
-            <b>MANCHANA SRINIVAS</b>
-            <small>CRM</small>
+            <b>Business Portal</b>
+            <small>MANAGEMENT SYSTEM</small>
           </div>
         </div>
 
@@ -1816,7 +2004,9 @@ export default function App() {
                       ? "Search vehicle / voucher..."
                       : page === SUMMARY
                         ? "Search company..."
-                        : "Search records..."
+                        : page === LEDGER
+                          ? "Search company / vehicle / voucher..."
+                          : "Search records..."
                 }
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
@@ -1825,7 +2015,7 @@ export default function App() {
           )}
 
           <div className="top-actions">
-            {page !== "Dashboard" && page !== SUMMARY && (
+            {page !== "Dashboard" && page !== SUMMARY && page !== LEDGER && (
               <button
                 className="primary"
                 onClick={() => {
@@ -2477,6 +2667,233 @@ export default function App() {
                     <div>
                       <span>Not linked to a purchase</span>
                       <b>{rentView.totals.unlinked}</b>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : page === LEDGER ? (
+            /* LEDGER — purchases, sales and payments together */
+
+            <div className="panel fill">
+              <div className="table-toolbar">
+                <div>
+                  <h3>Ledger</h3>
+
+                  <p className="muted">
+                    {ledgerView.rows.length} of {ledgerView.all} entries ·
+                    purchases, sales, payments paid and received
+                    {summaryLoading && !summaryFirstLoad && " · refreshing…"}
+                  </p>
+                </div>
+
+                {exportButtons}
+              </div>
+
+              <div className="filter-bar">
+                <label>
+                  Company
+                  <select
+                    value={lCompany}
+                    onChange={(e) => setLCompany(e.target.value)}
+                  >
+                    <option value="">All companies</option>
+                    {companies.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  Type
+                  <select
+                    value={lType}
+                    onChange={(e) => setLType(e.target.value)}
+                  >
+                    <option value="">All types</option>
+                    <option value="Purchase">Purchase</option>
+                    <option value="Sale">Sale</option>
+                    <option value="Paid">Payment paid</option>
+                    <option value="Received">Payment received</option>
+                  </select>
+                </label>
+
+                <label>
+                  From
+                  <input
+                    type="date"
+                    value={lFrom}
+                    max={lTo || undefined}
+                    onChange={(e) => setLFrom(e.target.value)}
+                  />
+                </label>
+
+                <label>
+                  To
+                  <input
+                    type="date"
+                    value={lTo}
+                    min={lFrom || undefined}
+                    onChange={(e) => setLTo(e.target.value)}
+                  />
+                </label>
+
+                {ledgerFiltered && (
+                  <button
+                    type="button"
+                    className="secondary clear-filters"
+                    onClick={() => {
+                      setLCompany("");
+                      setLType("");
+                      setLFrom("");
+                      setLTo("");
+                      setSearch("");
+                    }}
+                  >
+                    <X size={14} />
+                    Clear filters
+                  </button>
+                )}
+              </div>
+
+              {summaryFirstLoad ? (
+                <p className="muted pad">Loading records...</p>
+              ) : (
+                <div className="table-wrap">
+                  <table className="summary-table">
+                    <thead>
+                      <tr>
+                        <SortTh
+                          label="Date"
+                          k="date"
+                          kind="date"
+                          sort={lSort}
+                          onSort={sortL}
+                        />
+                        <SortTh
+                          label="Type"
+                          k="kind"
+                          sort={lSort}
+                          onSort={sortL}
+                        />
+                        <SortTh
+                          label="Company"
+                          k="company"
+                          sort={lSort}
+                          onSort={sortL}
+                        />
+                        <SortTh
+                          label="Vehicle"
+                          k="vehicle"
+                          sort={lSort}
+                          onSort={sortL}
+                        />
+                        <SortTh
+                          label="Voucher / reference"
+                          k="ref"
+                          sort={lSort}
+                          onSort={sortL}
+                        />
+                        <SortTh
+                          label="Qty (qtl)"
+                          k="qty"
+                          kind="num"
+                          right
+                          sort={lSort}
+                          onSort={sortL}
+                        />
+                        <SortTh
+                          label="Total"
+                          k="amount"
+                          kind="num"
+                          right
+                          sort={lSort}
+                          onSort={sortL}
+                        />
+                      </tr>
+                    </thead>
+
+                    <tbody>
+                      {ledgerView.rows.map((r) => (
+                        <tr key={r.id}>
+                          <td>{dayOf(r.date) || "—"}</td>
+                          <td>
+                            <span
+                              className={`type-pill t-${r.kind.toLowerCase()}`}
+                            >
+                              {r.kind === "Paid"
+                                ? "Payment paid"
+                                : r.kind === "Received"
+                                  ? "Payment received"
+                                  : r.kind}
+                            </span>
+                          </td>
+                          <td>{r.company || "—"}</td>
+                          <td>{r.vehicle || "—"}</td>
+                          <td>{r.ref || "—"}</td>
+                          <td className="num">
+                            {r.qty == null ? "—" : qty(r.qty)}
+                          </td>
+                          <td className="num">{money(r.amount)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+
+                  {!ledgerView.rows.length && (
+                    <p className="muted pad">
+                      {ledgerView.all && ledgerFiltered
+                        ? "No entries match these filters."
+                        : "No entries yet."}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {!summaryFirstLoad && (
+                <div className="totals-bar one-line">
+                  <div className="totals-label">
+                    {ledgerFiltered ? "Filtered totals" : "Totals"}
+                  </div>
+
+                  <div className="totals-items">
+                    <div title="Purchase qty (qtl)">
+                      <span>Purchase qty</span>
+                      <b>{qty(ledgerView.totals.pQty)}</b>
+                    </div>
+                    <div title="Sale qty (qtl)">
+                      <span>Sale qty</span>
+                      <b>{qty(ledgerView.totals.sQty)}</b>
+                    </div>
+                    <div title="Total purchases">
+                      <span>Purchases</span>
+                      <b>{money(ledgerView.totals.purchases)}</b>
+                    </div>
+                    <div title="Total sales">
+                      <span>Sales</span>
+                      <b>{money(ledgerView.totals.sales)}</b>
+                    </div>
+                    <div title="Total paid">
+                      <span>Paid</span>
+                      <b>{money(ledgerView.totals.paid)}</b>
+                    </div>
+                    <div title="Total received">
+                      <span>Received</span>
+                      <b>{money(ledgerView.totals.received)}</b>
+                    </div>
+                    <div title="To pay = purchases - paid">
+                      <span>To pay</span>
+                      <b>{money(ledgerView.totals.payable)}</b>
+                    </div>
+                    <div title="To receive = sales - received">
+                      <span>To receive</span>
+                      <b>{money(ledgerView.totals.receivable)}</b>
+                    </div>
+                    <div title="Remaining balance = to receive - to pay">
+                      <span>Balance</span>
+                      <b>{money(ledgerView.totals.balance)}</b>
                     </div>
                   </div>
                 </div>

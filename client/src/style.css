@@ -1167,3 +1167,74 @@ td.num {
   outline-offset: 3px;
   border-radius: 4px;
 }
+
+
+/* ---------- ledger type labels ---------- */
+
+.type-pill {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.type-pill.t-purchase {
+  background: #e8eefe;
+  color: #3157d5;
+}
+
+.type-pill.t-sale {
+  background: #e3f6ec;
+  color: #17794a;
+}
+
+.type-pill.t-paid {
+  background: #fff1dc;
+  color: #a15c07;
+}
+
+.type-pill.t-received {
+  background: #dff5f3;
+  color: #0d7a72;
+}
+
+
+/* ---------- single-line totals bar (Ledger) ---------- */
+
+.panel.fill .totals-bar.one-line {
+  flex-wrap: nowrap;
+  gap: 18px;
+  margin-top: 6px;
+  padding: 6px 14px;
+}
+
+.totals-bar.one-line .totals-label {
+  flex: none;
+  white-space: nowrap;
+}
+
+.totals-bar.one-line .totals-items {
+  flex: 1;
+  flex-wrap: nowrap;
+  justify-content: space-between;
+  gap: 20px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.totals-bar.one-line .totals-items div {
+  flex: none;
+  gap: 0;
+}
+
+.totals-bar.one-line .totals-items span {
+  white-space: nowrap;
+  font-size: 10.5px;
+}
+
+.totals-bar.one-line .totals-items b {
+  white-space: nowrap;
+  font-size: 14px;
+}
