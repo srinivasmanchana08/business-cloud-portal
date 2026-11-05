@@ -29,6 +29,7 @@ import {
     ArrowUp,
     Scale,
   Truck,
+  Banknote,
   ArrowDown,
   X,
   FileSpreadsheet,
@@ -77,6 +78,7 @@ const nav = [
   ["Payments", Wallet],
   ["Company Summary", Scale],
   ["Vehicle Tracking", Truck],
+  ["Vehicle Rent", Banknote],
 ];
 
 // =====================================================
@@ -115,6 +117,16 @@ const TOTAL_KEY = {
 
 const SUMMARY = "Company Summary";
 const TRACK = "Vehicle Tracking";
+const RENT = "Vehicle Rent";
+
+// singular names used on the "Add ..." button and the modal title
+const RECORD_LABEL = {
+  Companies: "Company",
+  Purchases: "Purchase",
+  Sales: "Sale",
+  Payments: "Payment",
+  Rents: "Vehicle rent",
+};
 
 // vehicle numbers compared without spaces / dashes / case
 const normVehicle = (v) => String(v || "").replace(/[\s-]/g, "").toUpperCase();
@@ -126,6 +138,51 @@ const EMPTY_ROWS = [];
 const EMPTY_FILTERS = { company: "", from: "", to: "", direction: "" };
 
 const dayOf = (value) => String(value || "").slice(0, 10);
+
+// A rent row is linked to the purchase of the same vehicle whose date is
+// closest (within this many days). Same company wins ties.
+const RENT_MATCH_DAYS = 15;
+
+function matchRents(rents, purchases) {
+  const byVehicle = {};
+
+  purchases.forEach((p) => {
+    const k = normVehicle(p.vehicle_number);
+    if (k) (byVehicle[k] = byVehicle[k] || []).push(p);
+  });
+
+  const claimed = new Set();
+  const rentByPurchase = {}; // purchase id -> total rent
+  const linked = {}; // rent id -> purchase
+
+  [...rents]
+    .sort((a, b) => dayOf(a.entry_date).localeCompare(dayOf(b.entry_date)))
+    .forEach((r) => {
+      const best = (byVehicle[normVehicle(r.vehicle_number)] || [])
+        .map((p) => ({
+          p,
+          gap: Math.abs(daysBetween(r.entry_date, p.entry_date)),
+          sameCo: p.company_id === r.company_id,
+          free: !claimed.has(p.id),
+        }))
+        .filter((x) => x.gap <= RENT_MATCH_DAYS)
+        .sort(
+          (a, b) =>
+            Number(b.sameCo) - Number(a.sameCo) ||
+            a.gap - b.gap ||
+            Number(b.free) - Number(a.free)
+        )[0];
+
+      if (!best) return;
+
+      claimed.add(best.p.id);
+      linked[r.id] = best.p;
+      rentByPurchase[best.p.id] =
+        (rentByPurchase[best.p.id] || 0) + Number(r.amount || 0);
+    });
+
+  return { rentByPurchase, linked };
+}
 
 const getErrorMessage = (error) =>
   error?.message || "Something went wrong. Please try again.";
@@ -141,7 +198,8 @@ export default function App() {
   const [page, setPage] = useState("Dashboard");
 
   // the Vehicle Tracking page adds Purchase records
-  const dataPage = page === TRACK ? "Purchases" : page;
+  const dataPage =
+    page === TRACK ? "Purchases" : page === RENT ? "Rents" : page;
 
     // ---- Redux (cached data, filters, sort)
   const dispatch = useDispatch();
@@ -157,12 +215,13 @@ export default function App() {
   const purchasesList = useSelector((s) => s.data.lists.Purchases);
   const salesList = useSelector((s) => s.data.lists.Sales);
   const paymentsList = useSelector((s) => s.data.lists.Payments);
+  const rentsList = useSelector((s) => s.data.lists.Rents);
 
   const rows = list?.items || EMPTY_ROWS;
   const firstLoad = Boolean(list?.loading && !list?.loaded);
   const refreshing = Boolean(list?.loading && list?.loaded);
 
-  const summaryParts = [purchasesList, salesList, paymentsList];
+  const summaryParts = [purchasesList, salesList, paymentsList, rentsList];
   const summaryLoading = summaryParts.some((l) => l.loading);
   const summaryFirstLoad = summaryParts.some((l) => l.loading && !l.loaded);
 
@@ -188,6 +247,14 @@ export default function App() {
   const [tTo, setTTo] = useState("");
   const [tStatus, setTStatus] = useState("");
   const [tDesc, setTDesc] = useState(true);
+
+  // Vehicle Rent filters
+  const [rCompany, setRCompany] = useState("");
+  const [rAccount, setRAccount] = useState("");
+  const [rFrom, setRFrom] = useState("");
+  const [rTo, setRTo] = useState("");
+  const [rStatus, setRStatus] = useState("");
+  const [rDesc, setRDesc] = useState(true);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -333,7 +400,12 @@ const api = useCallback(
       dispatch(fetchList({ api, page: "Companies", force }));
 
       if (page === TRACK) {
-        ["Purchases", "Sales"].forEach((p) =>
+        // rent is needed here to deduct it from the margin
+        ["Purchases", "Sales", "Rents"].forEach((p) =>
+          dispatch(fetchList({ api, page: p, force }))
+        );
+      } else if (page === RENT) {
+        ["Rents", "Purchases"].forEach((p) =>
           dispatch(fetchList({ api, page: p, force }))
         );
       } else if (page === SUMMARY) {
@@ -517,6 +589,7 @@ const api = useCallback(
 
   const tracking = useMemo(() => {
     const purchases = purchasesList.items.map((p) => ({ ...p, _sales: [] }));
+    const { rentByPurchase } = matchRents(rentsList.items, purchasesList.items);
 
     const sales = [...salesList.items].sort((a, b) =>
       dayOf(a.entry_date).localeCompare(dayOf(b.entry_date))
@@ -603,14 +676,22 @@ const api = useCallback(
 
         return true;
       })
-      .map((r) => ({
-        ...r,
-        days: r.p && r.s ? daysBetween(r.p.entry_date, r.s.entry_date) : null,
-        margin:
-          r.p && r.s && r.single
-            ? Number(r.s.gross_total || 0) - Number(r.p.purchase_total || 0)
-            : null,
-      }))
+      .map((r) => {
+        const rent = r.p ? rentByPurchase[r.p.id] || 0 : 0;
+
+        return {
+          ...r,
+          rent,
+          days: r.p && r.s ? daysBetween(r.p.entry_date, r.s.entry_date) : null,
+          // margin = sale - purchase - vehicle rent
+          margin:
+            r.p && r.s && r.single
+              ? Number(r.s.gross_total || 0) -
+                Number(r.p.purchase_total || 0) -
+                rent
+              : null,
+        };
+      })
       .sort((a, b) => {
         const da = dayOf((a.p || a.s).entry_date);
         const db = dayOf((b.p || b.s).entry_date);
@@ -619,14 +700,21 @@ const api = useCallback(
 
     // totals: each purchase counted once even if sold in several parts
     const seen = new Set();
-    const totals = { pQty: 0, pTotal: 0, sQty: 0, sTotal: 0, soldPurchase: 0, pending: 0 };
+    const totals = {
+      pQty: 0, pTotal: 0, sQty: 0, sTotal: 0,
+      soldPurchase: 0, rent: 0, soldRent: 0, pending: 0,
+    };
 
     rowsOut.forEach((r) => {
       if (r.p && !seen.has(r.p.id)) {
         seen.add(r.p.id);
         totals.pQty += Number(r.p.quantity || 0);
         totals.pTotal += Number(r.p.purchase_total || 0);
-        if (r.status === "Sold") totals.soldPurchase += Number(r.p.purchase_total || 0);
+        totals.rent += r.rent;
+        if (r.status === "Sold") {
+          totals.soldPurchase += Number(r.p.purchase_total || 0);
+          totals.soldRent += r.rent;
+        }
       }
 
       if (r.s) {
@@ -637,16 +725,82 @@ const api = useCallback(
       if (r.status === "Pending") totals.pending += 1;
     });
 
-    totals.margin = totals.sTotal - totals.soldPurchase;
+    totals.margin = totals.sTotal - totals.soldPurchase - totals.soldRent;
 
     return { rows: rowsOut, totals };
   }, [
-    purchasesList, salesList, companyMap,
+    purchasesList, salesList, rentsList, companyMap,
     tPCompany, tSCompany, tFrom, tTo, tStatus, tDesc, search,
   ]);
 
   const trackFiltered = Boolean(
     tPCompany || tSCompany || tFrom || tTo || tStatus || search
+  );
+
+  // ===================================================
+  // 10c-2. VEHICLE RENT (rent paid per purchase vehicle)
+  // ===================================================
+
+  const rentView = useMemo(() => {
+    const { linked } = matchRents(rentsList.items, purchasesList.items);
+    const q = search.trim().toLowerCase();
+    const dir = rDesc ? -1 : 1;
+
+    const rowsOut = rentsList.items
+      .filter((r) => {
+        const day = dayOf(r.entry_date);
+
+        if (rCompany && r.company_id !== rCompany) return false;
+        if (rAccount && (r.account_name || "") !== rAccount) return false;
+        if (rFrom && day < rFrom) return false;
+        if (rTo && day > rTo) return false;
+        if (rStatus && (r.paid_date ? "Paid" : "Unpaid") !== rStatus) return false;
+
+        if (q) {
+          const text = [r.vehicle_number, r.account_name, companyMap[r.company_id]]
+            .join(" ")
+            .toLowerCase();
+          if (!text.includes(q)) return false;
+        }
+
+        return true;
+      })
+      .map((r) => ({ ...r, isLinked: Boolean(linked[r.id]) }))
+      .sort(
+        (a, b) =>
+          (dayOf(a.entry_date).localeCompare(dayOf(b.entry_date)) ||
+            String(a.created_at || a.id).localeCompare(String(b.created_at || b.id))) *
+          dir
+      );
+
+    const totals = { amount: 0, paid: 0, unpaid: 0, unpaidCount: 0, unlinked: 0 };
+
+    rowsOut.forEach((r) => {
+      const amount = Number(r.amount || 0);
+      totals.amount += amount;
+
+      if (r.paid_date) {
+        totals.paid += amount;
+      } else {
+        totals.unpaid += amount;
+        totals.unpaidCount += 1;
+      }
+
+      if (!r.isLinked) totals.unlinked += 1;
+    });
+
+    const accounts = [
+      ...new Set(rentsList.items.map((r) => r.account_name).filter(Boolean)),
+    ].sort((a, b) => a.localeCompare(b));
+
+    return { rows: rowsOut, totals, accounts };
+  }, [
+    rentsList, purchasesList, companyMap,
+    rCompany, rAccount, rFrom, rTo, rStatus, rDesc, search,
+  ]);
+
+  const rentFiltered = Boolean(
+    rCompany || rAccount || rFrom || rTo || rStatus || search
   );
 
   // ===================================================
@@ -676,9 +830,9 @@ const api = useCallback(
         headers: [
           "Vehicle", "Purchase company", "Purchase date", "Purchase qty (qtl)",
           "Purchase total", "Sale company", "Sale date", "Sale qty (qtl)",
-          "Sale total", "Days", "Margin", "Status",
+          "Sale total", "Days", "Vehicle rent", "Margin", "Status",
         ],
-        kinds: [null, null, null, "qty", "money", null, null, "qty", "money", "int", "money", null],
+        kinds: [null, null, null, "qty", "money", null, null, "qty", "money", "int", "money", "money", null],
         rows: tracking.rows.map((r) => [
           r.p?.vehicle_number || r.s?.vehicle_number || "",
           r.p ? name(r.p.company_id) : "",
@@ -690,12 +844,54 @@ const api = useCallback(
           r.s ? Number(r.s.quantity || 0) : null,
           r.s ? Number(r.s.gross_total || 0) : null,
           r.days,
+          r.rent || null,
           r.margin,
           r.status === "No purchase" ? "No purchase found" : r.status,
         ]),
         totalsRow: [
           `Total (${tracking.rows.length} records)`, "", "", t.pQty, t.pTotal,
-          "", "", t.sQty, t.sTotal, null, t.margin, `${t.pending} pending`,
+          "", "", t.sQty, t.sTotal, null, t.rent, t.margin, `${t.pending} pending`,
+        ],
+      };
+    }
+
+    // ---- Vehicle rent
+    if (page === RENT) {
+      const parts = [];
+      if (rCompany) parts.push(`Purchase company: ${name(rCompany)}`);
+      if (rAccount) parts.push(`Account: ${rAccount}`);
+      if (rFrom) parts.push(`From ${rFrom}`);
+      if (rTo) parts.push(`To ${rTo}`);
+      if (rStatus) parts.push(`Status: ${rStatus}`);
+      if (search) parts.push(`Search: ${search}`);
+
+      const t = rentView.totals;
+
+      return {
+        title: "Vehicle Rent",
+        filterText: parts.join(", "),
+        headers: [
+          "Purchase date", "Purchase company", "Vehicle", "Paid date",
+          "Rent amount", "Account name", "Status",
+        ],
+        kinds: [null, null, null, null, "money", null, null],
+        rows: rentView.rows.map((r) => [
+          day(r.entry_date),
+          name(r.company_id),
+          r.vehicle_number || "",
+          day(r.paid_date),
+          r.amount == null || r.amount === "" ? null : Number(r.amount),
+          r.account_name || "",
+          r.paid_date ? "Paid" : "Unpaid",
+        ]),
+        totalsRow: [
+          `Total (${rentView.rows.length} records)`, "", "", "",
+          t.amount, "", `${t.unpaidCount} unpaid`,
+        ],
+        summary: [
+          ["Rent paid", t.paid, "money"],
+          ["Rent not yet paid", t.unpaid, "money"],
+          ["Total rent", t.amount, "money"],
         ],
       };
     }
@@ -923,6 +1119,16 @@ const api = useCallback(
       ["reference", "Reference", "text"],
       ["notes", "Notes", "text"],
     ],
+
+    Rents: [
+      ["company_id", "Purchase company", "company", true],
+      ["entry_date", "Purchase date", "date", true],
+      ["vehicle_number", "Vehicle number", "text", true],
+      ["paid_date", "Paid date", "date"],
+      ["amount", "Rent amount (₹)", "number"],
+      ["account_name", "Account name", "text"],
+      ["notes", "Notes", "text"],
+    ],
   };
 
   // ===================================================
@@ -1084,7 +1290,7 @@ const api = useCallback(
     setBusy(true);
 
     try {
-            await dispatch(deleteRecord({ api, page, id })).unwrap();
+            await dispatch(deleteRecord({ api, page: dataPage, id })).unwrap();
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -1251,7 +1457,9 @@ const api = useCallback(
 
               <input
                 placeholder={
-                  page === TRACK
+                  page === RENT
+                    ? "Search vehicle / account..."
+                    : page === TRACK
                     ? "Search vehicle / voucher..."
                     : page === SUMMARY
                     ? "Search company..."
@@ -1275,7 +1483,7 @@ const api = useCallback(
                 }}
               >
                 <Plus size={16} />
-                Add {dataPage.slice(0, -1)}
+                Add {RECORD_LABEL[dataPage]}
               </button>
             )}
 
@@ -1501,7 +1709,8 @@ const api = useCallback(
                         <th className="num">Qty (qtl)</th>
                         <th className="num">Sale total</th>
                         <th className="num">Days</th>
-                        <th className="num">Margin</th>
+                        <th className="num">Rent</th>
+                        <th className="num" title="Sale total - purchase total - vehicle rent">Margin</th>
                         <th>Status</th>
                       </tr>
                     </thead>
@@ -1519,6 +1728,7 @@ const api = useCallback(
                           <td className="num">{r.s ? qty(r.s.quantity) : "—"}</td>
                           <td className="num">{r.s ? money(r.s.gross_total) : "—"}</td>
                           <td className="num">{r.days ?? "—"}</td>
+                          <td className="num">{r.rent ? money(r.rent) : "—"}</td>
                           <td className={`num ${r.margin > 0 ? "due-in" : r.margin < 0 ? "due-out" : ""}`}>
                             {r.margin === null ? "—" : money(r.margin)}
                           </td>
@@ -1567,8 +1777,244 @@ const api = useCallback(
                       <b>{money(tracking.totals.sTotal)}</b>
                     </div>
                     <div>
-                      <span>Margin (sold)</span>
+                      <span>Vehicle rent</span>
+                      <b>{money(tracking.totals.rent)}</b>
+                    </div>
+                    <div>
+                      <span>Margin (sold, after rent)</span>
                       <b>{money(tracking.totals.margin)}</b>
+                    </div>
+                  </div>
+
+                </div>
+              )}
+
+            </div>
+
+          ) : page === RENT ? (
+
+            /* VEHICLE RENT */
+
+            <div className="panel fill">
+
+              <div className="table-toolbar">
+
+                <div>
+                  <h3>Vehicle rent</h3>
+
+                  <p className="muted">
+                    {rentFiltered
+                      ? `${rentView.rows.length} of ${rentsList.items.length} records`
+                      : `${rentsList.items.length} records`}
+                    {" · rent is deducted from the margin in Vehicle Tracking"}
+                    {rentsList.loading && rentsList.loaded && " · refreshing…"}
+                  </p>
+                </div>
+
+                {exportButtons}
+
+              </div>
+
+              <div className="filter-bar">
+
+                <label>
+                  Purchase company
+                  <select
+                    value={rCompany}
+                    onChange={(e) => setRCompany(e.target.value)}
+                  >
+                    <option value="">All companies</option>
+                    {companies.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  Account name
+                  <select
+                    value={rAccount}
+                    onChange={(e) => setRAccount(e.target.value)}
+                  >
+                    <option value="">All accounts</option>
+                    {rentView.accounts.map((a) => (
+                      <option key={a} value={a}>{a}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  From
+                  <input
+                    type="date"
+                    value={rFrom}
+                    max={rTo || undefined}
+                    onChange={(e) => setRFrom(e.target.value)}
+                  />
+                </label>
+
+                <label>
+                  To
+                  <input
+                    type="date"
+                    value={rTo}
+                    min={rFrom || undefined}
+                    onChange={(e) => setRTo(e.target.value)}
+                  />
+                </label>
+
+                <label>
+                  Status
+                  <select
+                    value={rStatus}
+                    onChange={(e) => setRStatus(e.target.value)}
+                  >
+                    <option value="">All</option>
+                    <option value="Paid">Paid</option>
+                    <option value="Unpaid">Unpaid</option>
+                  </select>
+                </label>
+
+                {rentFiltered && (
+                  <button
+                    type="button"
+                    className="secondary clear-filters"
+                    onClick={() => {
+                      setRCompany("");
+                      setRAccount("");
+                      setRFrom("");
+                      setRTo("");
+                      setRStatus("");
+                      setSearch("");
+                    }}
+                  >
+                    <X size={14} />
+                    Clear filters
+                  </button>
+                )}
+
+              </div>
+
+              {rentsList.loading && !rentsList.loaded ? (
+
+                <p className="muted pad">Loading records...</p>
+
+              ) : (
+
+                <div className="table-wrap">
+
+                  <table className="summary-table">
+
+                    <thead>
+                      <tr>
+                        <th>
+                          <button
+                            type="button"
+                            className="sort-btn"
+                            onClick={() => setRDesc(!rDesc)}
+                            title={rDesc ? "Newest first — click for oldest first" : "Oldest first — click for newest first"}
+                          >
+                            Purchase date
+                            {rDesc ? <ArrowDown size={13} /> : <ArrowUp size={13} />}
+                          </button>
+                        </th>
+                        <th>Purchase company</th>
+                        <th>Vehicle</th>
+                        <th>Paid date</th>
+                        <th className="num">Rent amount</th>
+                        <th>Account name</th>
+                        <th>Status</th>
+                        <th title="Whether this rent was matched to a purchase, so it is deducted from the margin">Purchase link</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+
+                    <tbody>
+                      {rentView.rows.map((r) => (
+                        <tr key={r.id}>
+                          <td>{dayOf(r.entry_date) || "—"}</td>
+                          <td>{companyMap[r.company_id] || "—"}</td>
+                          <td><b>{r.vehicle_number || "—"}</b></td>
+                          <td>{r.paid_date ? dayOf(r.paid_date) : "—"}</td>
+                          <td className="num">
+                            {r.amount == null || r.amount === "" ? "—" : money(r.amount)}
+                          </td>
+                          <td>{r.account_name || "—"}</td>
+                          <td>
+                            <span className={`status-pill ${r.paid_date ? "sold" : "pending"}`}>
+                              {r.paid_date ? "Paid" : "Unpaid"}
+                            </span>
+                          </td>
+                          <td>
+                            <span className={`status-pill ${r.isLinked ? "sold" : "orphan"}`}>
+                              {r.isLinked ? "Linked" : "No purchase found"}
+                            </span>
+                          </td>
+                          <td>
+                            <div className="row-actions">
+
+                              <button
+                                onClick={() => {
+                                  setEditing(r);
+                                  setError("");
+                                  setModal(true);
+                                }}
+                                title="Edit"
+                              >
+                                <Edit3 size={16} />
+                              </button>
+
+                              <button
+                                onClick={() => remove(r.id)}
+                                title="Delete"
+                              >
+                                <Trash2 size={16} />
+                              </button>
+
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+
+                  </table>
+
+                  {!rentView.rows.length && (
+                    <p className="muted pad">
+                      {rentsList.items.length && rentFiltered
+                        ? "No records match these filters."
+                        : "No rent records yet. Use Add Vehicle rent to create one."}
+                    </p>
+                  )}
+
+                </div>
+
+              )}
+
+              {!(rentsList.loading && !rentsList.loaded) && (
+                <div className="totals-bar">
+
+                  <div className="totals-label">
+                    {rentFiltered ? "Filtered totals" : "Totals"}
+                    <small>{rentView.rows.length} records · {rentView.totals.unpaidCount} unpaid</small>
+                  </div>
+
+                  <div className="totals-items">
+                    <div>
+                      <span>Total rent</span>
+                      <b>{money(rentView.totals.amount)}</b>
+                    </div>
+                    <div>
+                      <span>Paid</span>
+                      <b>{money(rentView.totals.paid)}</b>
+                    </div>
+                    <div>
+                      <span>Not yet paid</span>
+                      <b>{money(rentView.totals.unpaid)}</b>
+                    </div>
+                    <div>
+                      <span>Not linked to a purchase</span>
+                      <b>{rentView.totals.unlinked}</b>
                     </div>
                   </div>
 
@@ -2018,7 +2464,7 @@ const api = useCallback(
                 <p className="eyebrow">RECORD MANAGEMENT</p>
 
                 <h2>
-                  {editing ? "Edit" : "Add"} {dataPage.slice(0, -1)}
+                  {editing ? "Edit" : "Add"} {RECORD_LABEL[dataPage]}
                 </h2>
               </div>
 
@@ -2105,9 +2551,10 @@ const api = useCallback(
                         step={type === "number" ? "any" : undefined}
                         defaultValue={
                           editing?.[key] ??
-                          (type === "date" ? today() : "")
+                          (type === "date" && key !== "paid_date" ? today() : "")
                         }
                         required={required}
+                        list={key === "account_name" ? "account-names" : undefined}
                       />
 
                     )}
@@ -2118,6 +2565,14 @@ const api = useCallback(
               )}
 
             </div>
+
+            {dataPage === "Rents" && (
+              <datalist id="account-names">
+                {rentView.accounts.map((a) => (
+                  <option key={a} value={a} />
+                ))}
+              </datalist>
+            )}
 
             <div className="modal-actions">
 

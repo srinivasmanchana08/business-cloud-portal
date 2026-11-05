@@ -7,7 +7,13 @@ import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
 // Cached data younger than this is shown without re-fetching.
 const STALE_MS = 60 * 1000;
 
-export const LIST_PAGES = ["Companies", "Purchases", "Sales", "Payments"];
+export const LIST_PAGES = [
+  "Companies",
+  "Purchases",
+  "Sales",
+  "Payments",
+  "Rents",
+];
 export const FILTER_PAGES = ["Purchases", "Sales", "Payments"];
 
 const blankFilters = () => ({
@@ -51,7 +57,7 @@ export const fetchStats = createAsyncThunk(
       if (!force && Date.now() - statsAt < STALE_MS) return false;
       return true;
     },
-  }
+  },
 );
 
 export const fetchList = createAsyncThunk(
@@ -70,7 +76,7 @@ export const fetchList = createAsyncThunk(
       }
       return true;
     },
-  }
+  },
 );
 
 export const saveRecord = createAsyncThunk(
@@ -85,11 +91,11 @@ export const saveRecord = createAsyncThunk(
 
     // Refresh the list (and dashboard totals) so the cache is correct.
     const jobs = [dispatch(fetchList({ api, page, force: true }))];
-    if (page !== "Companies") {
+    if (page !== "Companies" && page !== "Rents") {
       jobs.push(dispatch(fetchStats({ api, force: true })));
     }
     await Promise.all(jobs);
-  }
+  },
 );
 
 export const deleteRecord = createAsyncThunk(
@@ -97,10 +103,10 @@ export const deleteRecord = createAsyncThunk(
   async ({ api, page, id }, { dispatch }) => {
     await api(`${page.toLowerCase()}/${id}`, { method: "DELETE" });
 
-    if (page !== "Companies") {
+    if (page !== "Companies" && page !== "Rents") {
       dispatch(fetchStats({ api, force: true }));
     }
-  }
+  },
 );
 
 // =====================================================

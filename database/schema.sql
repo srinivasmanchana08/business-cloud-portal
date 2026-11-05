@@ -81,6 +81,29 @@ begin
   end loop;
 end $$;
 
+-- Vehicle rent: rent paid per purchase vehicle. Deducted from the margin
+-- on the Vehicle Tracking page.
+create table if not exists public.vehicle_rents (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id),
+  entry_date date not null,            -- purchase / loading date
+  vehicle_number text not null,
+  paid_date date,                      -- empty = not paid yet
+  amount numeric(14,2) check (amount is null or amount >= 0),
+  account_name text,                   -- who the rent was paid to
+  notes text,
+  created_at timestamptz not null default now(),
+  owner_id uuid references auth.users(id) default auth.uid()
+);
+
+create index if not exists vehicle_rents_company_idx on public.vehicle_rents(company_id);
+create index if not exists vehicle_rents_vehicle_idx on public.vehicle_rents(vehicle_number);
+
+alter table public.vehicle_rents enable row level security;
+drop policy if exists "owner_all" on public.vehicle_rents;
+create policy "owner_all" on public.vehicle_rents for all to authenticated
+  using (owner_id = auth.uid()) with check (owner_id = auth.uid());
+
 -- If you already have rows without an owner, assign them (replace the UUID):
 -- update public.companies set owner_id = 'YOUR-USER-UUID' where owner_id is null;
 -- (repeat for purchases, sales, payments)

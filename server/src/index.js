@@ -1,4 +1,3 @@
-
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -201,6 +200,21 @@ const resources = {
       "direction",
       "amount",
       "reference",
+      "notes",
+    ],
+  },
+
+  // Vehicle rent paid to a transporter for a purchase vehicle.
+  // Exposed as /api/rents
+  rents: {
+    table: "vehicle_rents",
+    fields: [
+      "company_id",
+      "entry_date",
+      "vehicle_number",
+      "paid_date",
+      "amount",
+      "account_name",
       "notes",
     ],
   },
