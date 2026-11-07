@@ -577,6 +577,54 @@ export default function App() {
     [session, page, biz, api, dispatch],
   );
 
+  // ---- first load after sign-in: fetch everything before showing the app
+  const userId = session?.user?.id || null;
+  const [bootedFor, setBootedFor] = useState(null);
+  const [bootProgress, setBootProgress] = useState({ done: 0, total: 1 });
+  const [bootSlow, setBootSlow] = useState(false);
+  const booting = Boolean(userId) && bootedFor !== userId;
+
+  useEffect(() => {
+    if (!userId) {
+      setBootedFor(null);
+      return undefined;
+    }
+
+    let active = true;
+
+    const jobs = [
+      fetchStats({ api, force: true, business: "" }), // dashboard (all)
+      fetchList({ api, page: "Companies", force: true }),
+    ];
+
+    folders.forEach((f) =>
+      ["Purchases", "Sales", "Payments", "Rents"].forEach((p) =>
+        jobs.push(fetchList({ api, page: p, force: true, business: f.name })),
+      ),
+    );
+
+    setBootProgress({ done: 0, total: jobs.length });
+    setBootSlow(false);
+    const slowTimer = setTimeout(() => active && setBootSlow(true), 8000);
+
+    Promise.all(
+      jobs.map((job) =>
+        dispatch(job).then(() => {
+          if (active) setBootProgress((p) => ({ ...p, done: p.done + 1 }));
+        }),
+      ),
+    ).then(() => {
+      if (active) setBootedFor(userId);
+    });
+
+    return () => {
+      active = false;
+      clearTimeout(slowTimer);
+    };
+    // runs once per signed-in user (not on token refresh)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
+
   useEffect(() => {
     if (session) {
       refresh(false);
@@ -1798,8 +1846,8 @@ export default function App() {
     return (
       <main className="login-wrap">
         <div className="login-card">
-          <div className="brand-mark">BC</div>
-          <h2>Loading Business Portal...</h2>
+          <div className="brand-mark">MS</div>
+          <h2>Loading Manchana Srinivas...</h2>
           <p className="muted">Checking your login session.</p>
         </div>
       </main>
@@ -1810,13 +1858,47 @@ export default function App() {
   // 19. LOGIN SCREEN
   // ===================================================
 
+  if (booting) {
+    const pct = Math.round(
+      (bootProgress.done / Math.max(bootProgress.total, 1)) * 100,
+    );
+
+    return (
+      <main className="login-wrap">
+        <div className="login-card boot-card" role="status" aria-live="polite">
+          <div className="boot-spinner">
+            <div className="brand-mark">MS</div>
+          </div>
+
+          <h2>Loading your data...</h2>
+
+          <p className="muted">
+            {bootSlow
+              ? "The server is waking up. This can take up to a minute."
+              : "Getting companies, purchases, sales, payments and rent ready."}
+          </p>
+
+          <div
+            className="boot-bar"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={pct}
+          >
+            <span style={{ width: `${pct}%` }} />
+          </div>
+        </div>
+      </main>
+    );
+  }
+
   if (!session) {
     return (
       <main className="login-wrap">
         <form className="login-card" onSubmit={login}>
-          <div className="brand-mark">BC</div>
+          <div className="brand-mark">MS</div>
 
-          <p className="eyebrow">BUSINESS CLOUD PORTAL</p>
+          <p className="eyebrow">MANCHANA SRINIVAS</p>
 
           <h1>Welcome back</h1>
 
@@ -1868,10 +1950,10 @@ export default function App() {
 
       <aside className={`sidebar ${mobile ? "open" : ""}`}>
         <div className="brand">
-          <div className="brand-mark">BC</div>
+          <div className="brand-mark">MS</div>
 
           <div>
-            <b>Business Portal</b>
+            <b>Manchana Srinivas</b>
             <small>MANAGEMENT SYSTEM</small>
           </div>
         </div>

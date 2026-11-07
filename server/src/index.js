@@ -57,7 +57,7 @@ app.use(express.json({ limit: "1mb" }));
 app.get("/", (_req, res) => {
   res.status(200).json({
     success: true,
-    message: "Business Cloud Portal Backend is Running!",
+    message: "Manchana Srinivas Backend is Running!",
     status: "OK",
   });
 });
@@ -129,24 +129,6 @@ async function requireAuth(req, res, next) {
 
 // Protect all API routes.
 app.use("/api", requireAuth);
-
-// View-only users (app_metadata.app_role === "viewer") may read data but can
-// never create, update or delete. The role comes from Supabase's auth server
-// (getUser), so a change applies immediately and cannot be edited by the user.
-function blockViewerWrites(req, res, next) {
-  const isViewer = req.user?.app_metadata?.app_role === "viewer";
-  const readOnly = ["GET", "HEAD", "OPTIONS"].includes(req.method);
-
-  if (isViewer && !readOnly) {
-    return res.status(403).json({
-      error: "View-only access: you cannot add, edit or delete records.",
-    });
-  }
-
-  next();
-}
-
-app.use("/api", blockViewerWrites);
 
 // Businesses shown as folders in the sidebar.
 const BUSINESSES = ["DDGS", "Maize and Turmeric"];
