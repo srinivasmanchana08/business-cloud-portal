@@ -1328,8 +1328,8 @@ export default function App() {
           ["Total sales", t.sales, "money"],
           ["Total paid", t.paid, "money"],
           ["Total received", t.received, "money"],
-          ["To pay (purchases - paid)", t.payable, "money"],
-          ["To receive (sales - received)", t.receivable, "money"],
+          ["To pay", t.payable, "money"],
+          ["To receive", t.receivable, "money"],
           ["Remaining balance", t.balance, "money"],
         ],
       };
@@ -1531,6 +1531,19 @@ export default function App() {
     try {
       const spec = buildExport();
       if (biz) spec.title = `${spec.title} - ${biz}`;
+
+      // the company picked in the page filter is used in the file name
+      const companyId =
+        page === TRACK
+          ? tPCompany || tSCompany
+          : page === LEDGER
+            ? lCompany
+            : page === RENT
+              ? rCompany
+              : page === SUMMARY
+                ? sCompany
+                : filters?.company;
+      spec.company = companyMap[companyId] || "";
       if (type === "pdf") await exportPdf(spec);
       else await exportExcel(spec);
     } catch (err) {
