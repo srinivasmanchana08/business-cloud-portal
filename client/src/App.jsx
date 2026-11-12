@@ -107,9 +107,30 @@ const folders = [
   },
 ];
 
+// The role comes from the login token itself (the same token Supabase uses to
+// decide what this user may read), so the screen always matches the database.
+function getRole(session) {
+  try {
+    const payload = session.access_token.split(".")[1];
+    const json = JSON.parse(
+      decodeURIComponent(
+        atob(payload.replace(/-/g, "+").replace(/_/g, "/"))
+          .split("")
+          .map((c) => "%" + c.charCodeAt(0).toString(16).padStart(2, "0"))
+          .join(""),
+      ),
+    );
+    return json?.app_metadata?.role || session.user?.app_metadata?.role || "";
+  } catch {
+    return session?.user?.app_metadata?.role || "";
+  }
+}
+
 // Pages only the owner can open (also enforced by the API and Supabase RLS)
-const OWNER_ONLY_PAGES = ["Payments", "Company Summary", "Vehicle Rent"];
-const OWNER_ONLY_LISTS = ["Payments", "Rents"];
+const OWNER_ONLY_PAGES = ["Payments", "Vehicle Rent"];
+
+// Pages a view-only account does not get in its sidebar
+const VIEWER_HIDDEN_PAGES = ["Companies"];
 
 // Sidebar is always listed A to Z (pages inside each folder too)
 const byName = (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" });
@@ -181,7 +202,66 @@ const dayOf = (value) => String(value || "").slice(0, 10);
 
 // A rent row is linked to the purchase of the same vehicle whose date is
 // closest (within this many days). Same company wins ties.
+// A rent counts as paid when it has a paid date, or when it was paid to the
+// account "Loading" (loading charges are settled on the spot)
+const isRentPaid = (r) =>
+  Boolean(r.paid_date) ||
+  String(r.account_name || "")
+    .trim()
+    .toLowerCase() === "loading";
+
 const RENT_MATCH_DAYS = 15;
+
+// Payments are not linked to single bills, so they are applied oldest-first:
+// the oldest payments of a company settle that company's oldest bills.
+// Returns, per bill id, the date it became fully paid ("" = still open) and
+// the amount still open.
+function allocatePayments(bills, payments) {
+  const TOL = 1; // rupee rounding
+
+  const pools = {};
+  payments.forEach((p) => {
+    (pools[p.company_id] = pools[p.company_id] || []).push({
+      date: dayOf(p.payment_date),
+      left: Number(p.amount || 0),
+      created: String(p.created_at || ""),
+    });
+  });
+  Object.values(pools).forEach((list) =>
+    list.sort(
+      (a, b) =>
+        a.date.localeCompare(b.date) || a.created.localeCompare(b.created),
+    ),
+  );
+
+  const out = {};
+  [...bills]
+    .sort(
+      (a, b) =>
+        dayOf(a.date).localeCompare(dayOf(b.date)) ||
+        String(a.created_at || "").localeCompare(String(b.created_at || "")),
+    )
+    .forEach((bill) => {
+      let need = bill.total;
+      let last = "";
+
+      for (const p of pools[bill.company_id] || []) {
+        if (need <= TOL) break;
+        if (p.left <= 0) continue;
+        const use = Math.min(need, p.left);
+        p.left -= use;
+        need -= use;
+        last = p.date;
+      }
+
+      out[bill.id] = {
+        received: bill.total > 0 && need <= TOL ? last : "",
+        balance: Math.max(need, 0),
+      };
+    });
+
+  return out;
+}
 
 function matchRents(rents, purchases) {
   const byVehicle = {};
@@ -234,6 +314,7 @@ const NUMERIC_KEYS = [
   "amount",
   "credit_days",
   "unload_quantity",
+  "pay_days",
 ];
 const DATE_KEYS = [
   "entry_date",
@@ -241,6 +322,8 @@ const DATE_KEYS = [
   "payment_due_date",
   "unload_date",
   "paid_date",
+  "pay_received",
+  "paid_on",
 ];
 
 const DEFAULT_SORT = {
@@ -354,7 +437,84 @@ export default function App() {
   const paymentsList = useSelector((s) => s.data.lists.Payments);
   const rentsList = useSelector((s) => s.data.lists.Rents);
 
-  const rows = list?.items || EMPTY_ROWS;
+  // Payment received (sales) / paid (purchases) dates and the day count
+  const alloc = useMemo(() => {
+    const received = paymentsList.items.filter(
+      (p) => p.direction === "received",
+    );
+    const paid = paymentsList.items.filter((p) => p.direction === "paid");
+
+    const salesAlloc = allocatePayments(
+      salesList.items.map((x) => ({
+        id: x.id,
+        company_id: x.company_id,
+        date: x.entry_date,
+        total: Number(x.gross_total || 0),
+        created_at: x.created_at,
+      })),
+      received,
+    );
+
+    const purchasesAlloc = allocatePayments(
+      purchasesList.items.map((x) => ({
+        id: x.id,
+        company_id: x.company_id,
+        date: x.entry_date,
+        total: Number(x.purchase_total || 0),
+        created_at: x.created_at,
+      })),
+      paid,
+    );
+
+    const now = today();
+    const sales = {};
+
+    salesList.items.forEach((x) => {
+      const a = salesAlloc[x.id] || { received: "", balance: 0 };
+
+      // days only count once the vehicle is unloaded (unload quantity > 0)
+      const unloaded = Number(x.unload_quantity || 0) > 0;
+      const start = unloaded ? dayOf(x.unload_date) || dayOf(x.entry_date) : "";
+
+      sales[x.id] = {
+        received: a.received,
+        balance: a.balance,
+        pending: !a.received,
+        days: start ? Math.max(0, daysBetween(start, a.received || now)) : null,
+      };
+    });
+
+    const purchases = {};
+    purchasesList.items.forEach((x) => {
+      purchases[x.id] = purchasesAlloc[x.id] || { received: "", balance: 0 };
+    });
+
+    return { sales, purchases };
+  }, [salesList, purchasesList, paymentsList]);
+
+  const baseRows = list?.items || EMPTY_ROWS;
+  const rows = useMemo(() => {
+    if (page === "Sales") {
+      return baseRows.map((r) => {
+        const a = alloc.sales[r.id];
+        return {
+          ...r,
+          pay_received: a?.received || "",
+          pay_days: a ? a.days : null,
+          pay_pending: Boolean(a?.pending),
+        };
+      });
+    }
+
+    if (page === "Purchases") {
+      return baseRows.map((r) => ({
+        ...r,
+        paid_on: alloc.purchases[r.id]?.received || "",
+      }));
+    }
+
+    return baseRows;
+  }, [baseRows, page, alloc]);
   const firstLoad = Boolean(list?.loading && !list?.loaded);
   const refreshing = Boolean(list?.loading && list?.loaded);
 
@@ -554,6 +714,20 @@ export default function App() {
   // 9. LOAD DATA (cached in Redux, refreshed in background)
   // ===================================================
 
+  const userId = session?.user?.id || null;
+  // set in Supabase: app_metadata -> { "role": "owner" } (see owner_permissions.sql)
+  const role = session ? getRole(session) : "";
+  const isOwner = role === "owner";
+  // viewers can look at records but cannot add, edit or delete
+  const isViewer = role === "viewer";
+  // owner and viewer can read payments (Ledger, Company Summary, Dashboard);
+  // vehicle rent data is owner only
+  const canSeeFinance = isOwner || isViewer;
+  const allowedLists = (lists) =>
+    lists.filter((p) =>
+      p === "Rents" ? isOwner : p === "Payments" ? canSeeFinance : true,
+    );
+
   const refresh = useCallback(
     (force = false) => {
       if (!session) return;
@@ -563,7 +737,7 @@ export default function App() {
 
       if (page === TRACK) {
         // rent is needed here to deduct it from the margin
-        allowedLists(["Purchases", "Sales", "Rents"]).forEach((p) =>
+        allowedLists(["Purchases", "Sales", "Payments", "Rents"]).forEach((p) =>
           dispatch(fetchList({ api, page: p, force, business: biz })),
         );
       } else if (page === RENT) {
@@ -580,17 +754,18 @@ export default function App() {
         allowedLists([page]).length
       ) {
         dispatch(fetchList({ api, page, force, business: biz }));
+        // Sales / Purchases show when each bill was paid
+        if (page === "Sales" || page === "Purchases") {
+          allowedLists(["Payments"]).forEach((p) =>
+            dispatch(fetchList({ api, page: p, force, business: biz })),
+          );
+        }
       }
     },
-    [session, page, biz, api, dispatch, isOwner],
+    [session, page, biz, api, dispatch, isOwner, isViewer],
   );
 
   // ---- first load after sign-in: fetch everything before showing the app
-  const userId = session?.user?.id || null;
-  // set in Supabase: app_metadata -> { "role": "owner" } (see owner_permissions.sql)
-  const isOwner = session?.user?.app_metadata?.role === "owner";
-  const allowedLists = (lists) =>
-    lists.filter((p) => isOwner || !OWNER_ONLY_LISTS.includes(p));
   const [bootedFor, setBootedFor] = useState(null);
   const [bootProgress, setBootProgress] = useState({ done: 0, total: 1 });
   const [bootSlow, setBootSlow] = useState(false);
@@ -638,12 +813,16 @@ export default function App() {
   }, [userId]);
 
   useEffect(() => {
-    if (session && !isOwner && OWNER_ONLY_PAGES.includes(page)) {
+    if (
+      session &&
+      ((!isOwner && OWNER_ONLY_PAGES.includes(page)) ||
+        (isViewer && VIEWER_HIDDEN_PAGES.includes(page)))
+    ) {
       dispatch(setBusiness(""));
       setBiz("");
       setPage("Dashboard");
     }
-  }, [session, isOwner, page, dispatch]);
+  }, [session, isOwner, isViewer, page, dispatch]);
 
   useEffect(() => {
     if (session) {
@@ -897,10 +1076,12 @@ export default function App() {
       pco: (r) => companyMap[r.p?.company_id],
       pdate: (r) => dayOf((r.p || r.s).entry_date),
       pqty: (r) => (r.p ? Number(r.p.quantity || 0) : null),
+      prate: (r) => (r.p ? Number(r.p.rate || 0) : null),
       ptotal: (r) => (r.p ? Number(r.p.purchase_total || 0) : null),
       sco: (r) => companyMap[r.s?.company_id],
       sdate: (r) => (r.s ? dayOf(r.s.entry_date) : null),
       sqty: (r) => (r.s ? Number(r.s.quantity || 0) : null),
+      srate: (r) => (r.s ? Number(r.s.rate || 0) : null),
       stotal: (r) => (r.s ? Number(r.s.gross_total || 0) : null),
       days: (r) => r.days,
       rent: (r) => (r.p ? r.rent : null),
@@ -941,7 +1122,9 @@ export default function App() {
         return {
           ...r,
           rent,
-          days: r.p && r.s ? daysBetween(r.p.entry_date, r.s.entry_date) : null,
+          // days from unload until the sale was paid (still counting if unpaid)
+          days: r.s ? (alloc.sales[r.s.id]?.days ?? null) : null,
+          daysPending: r.s ? Boolean(alloc.sales[r.s.id]?.pending) : false,
           // margin = sale - purchase - vehicle rent
           margin:
             r.p && r.s && r.single
@@ -993,6 +1176,7 @@ export default function App() {
     purchasesList,
     salesList,
     rentsList,
+    alloc,
     companyMap,
     tPCompany,
     tSCompany,
@@ -1022,7 +1206,7 @@ export default function App() {
       amount: (r) =>
         r.amount == null || r.amount === "" ? null : Number(r.amount),
       account_name: (r) => r.account_name,
-      status: (r) => (r.paid_date ? "Paid" : "Unpaid"),
+      status: (r) => (isRentPaid(r) ? "Paid" : "Unpaid"),
       link: (r) => (r.isLinked ? "Linked" : "No purchase found"),
     };
 
@@ -1034,7 +1218,7 @@ export default function App() {
         if (rAccount && (r.account_name || "") !== rAccount) return false;
         if (rFrom && day < rFrom) return false;
         if (rTo && day > rTo) return false;
-        if (rStatus && (r.paid_date ? "Paid" : "Unpaid") !== rStatus)
+        if (rStatus && (isRentPaid(r) ? "Paid" : "Unpaid") !== rStatus)
           return false;
 
         if (q) {
@@ -1065,7 +1249,7 @@ export default function App() {
       const amount = Number(r.amount || 0);
       totals.amount += amount;
 
-      if (r.paid_date) {
+      if (isRentPaid(r)) {
         totals.paid += amount;
       } else {
         totals.unpaid += amount;
@@ -1243,10 +1427,12 @@ export default function App() {
           "Purchase company",
           "Purchase date",
           "Purchase qty (qtl)",
+          "Purchase rate",
           "Purchase total",
           "Sale company",
           "Sale date",
           "Sale qty (qtl)",
+          "Sale rate",
           "Sale total",
           "Days",
           "Vehicle rent",
@@ -1259,9 +1445,11 @@ export default function App() {
           null,
           "qty",
           "money",
+          "money",
           null,
           null,
           "qty",
+          "money",
           "money",
           "int",
           "money",
@@ -1273,10 +1461,12 @@ export default function App() {
           r.p ? name(r.p.company_id) : "",
           r.p ? day(r.p.entry_date) : "",
           r.p ? Number(r.p.quantity || 0) : null,
+          r.p && r.p.rate != null ? Number(r.p.rate) : null,
           r.p ? Number(r.p.purchase_total || 0) : null,
           r.s ? name(r.s.company_id) : "",
           r.s ? day(r.s.entry_date) : "",
           r.s ? Number(r.s.quantity || 0) : null,
+          r.s && r.s.rate != null ? Number(r.s.rate) : null,
           r.s ? Number(r.s.gross_total || 0) : null,
           r.days,
           r.rent || null,
@@ -1288,10 +1478,12 @@ export default function App() {
           "",
           "",
           t.pQty,
+          null,
           t.pTotal,
           "",
           "",
           t.sQty,
+          null,
           t.sTotal,
           null,
           t.rent,
@@ -1387,7 +1579,7 @@ export default function App() {
           day(r.paid_date),
           r.amount == null || r.amount === "" ? null : Number(r.amount),
           r.account_name || "",
-          r.paid_date ? "Paid" : "Unpaid",
+          isRentPaid(r) ? "Paid" : "Unpaid",
         ]),
         totalsRow: [
           `Total (${rentView.rows.length} records)`,
@@ -1509,14 +1701,16 @@ export default function App() {
     const kindOf = (key) =>
       key === "quantity"
         ? "qty"
-        : ["rate", "gross_total", "purchase_total"].includes(key)
-          ? "money"
-          : null;
+        : key === "pay_days"
+          ? "int"
+          : ["rate", "gross_total", "purchase_total"].includes(key)
+            ? "money"
+            : null;
 
     const cellOf = (r, key) => {
       if (key === "company_id") return name(r.company_id);
-      if (key === "entry_date" || key === "payment_due_date")
-        return day(r[key]);
+      if (DATE_KEYS.includes(key)) return day(r[key]);
+      if (key === "pay_days") return r.pay_days ?? null;
       if (kindOf(key))
         return r[key] == null || r[key] === "" ? null : Number(r[key]);
       return r[key] ?? "";
@@ -1675,7 +1869,6 @@ export default function App() {
       ["quantity", "Quantity (qtl)", "number"],
       ["rate", "Rate", "number"],
       ["purchase_total", "Purchase total (₹)", "number"],
-      ["seller", "Seller", "text"],
       ["notes", "Notes", "text"],
     ],
 
@@ -1729,6 +1922,7 @@ export default function App() {
       "quantity",
       "rate",
       "purchase_total",
+      "paid_on",
     ],
 
     Sales: [
@@ -1739,7 +1933,8 @@ export default function App() {
       "quantity",
       "rate",
       "gross_total",
-      "payment_due_date",
+      "pay_received",
+      "pay_days",
     ],
 
     Payments: [
@@ -1761,13 +1956,25 @@ export default function App() {
     purchase_total: "Purchase total",
     credit_days: "Credit days",
     vehicle_number: "Vehicle",
+    pay_received: "Payment received",
+    pay_days: "Days",
+    paid_on: "Paid on",
   };
 
   // ===================================================
   // 15. TABLE DISPLAY FORMAT
   // ===================================================
 
-  function display(key, value) {
+  function display(key, value, record) {
+    if (key === "pay_received" || key === "paid_on") {
+      return value ? dayOf(value) : "—";
+    }
+
+    if (key === "pay_days") {
+      if (value == null) return "—";
+      return `${value} ${value === 1 ? "day" : "days"}${record?.pay_pending ? " · pending" : ""}`;
+    }
+
     if (key === "company_id") {
       return companyMap[value] || "—";
     }
@@ -1839,6 +2046,12 @@ export default function App() {
           body[key] = null;
         }
       });
+
+      // a sale that has not been unloaded has no unload date or payment due date
+      if (dataPage === "Sales" && Number(body.unload_quantity || 0) === 0) {
+        body.unload_date = null;
+        body.payment_due_date = null;
+      }
 
       await dispatch(
         saveRecord({
@@ -2018,16 +2231,18 @@ export default function App() {
 
           return (
             <>
-              {nav.map(([name, Icon]) => (
-                <button
-                  key={name}
-                  className={`nav-item ${!biz && page === name ? "active" : ""}`}
-                  onClick={() => goTo(name)}
-                >
-                  <Icon size={18} />
-                  {name}
-                </button>
-              ))}
+              {nav
+                .filter(([n]) => !(isViewer && VIEWER_HIDDEN_PAGES.includes(n)))
+                .map(([name, Icon]) => (
+                  <button
+                    key={name}
+                    className={`nav-item ${!biz && page === name ? "active" : ""}`}
+                    onClick={() => goTo(name)}
+                  >
+                    <Icon size={18} />
+                    {name}
+                  </button>
+                ))}
 
               {folders.map((folder) => {
                 const open = Boolean(openFolders[folder.name]);
@@ -2092,7 +2307,13 @@ export default function App() {
             </div>
 
             <div>
-              <b>Account</b>
+              <b>
+                {isViewer
+                  ? "Account · View only"
+                  : isOwner
+                    ? "Account · Owner"
+                    : "Account"}
+              </b>
               <small>{session.user.email}</small>
             </div>
           </div>
@@ -2145,19 +2366,22 @@ export default function App() {
           )}
 
           <div className="top-actions">
-            {page !== "Dashboard" && page !== SUMMARY && page !== LEDGER && (
-              <button
-                className="primary"
-                onClick={() => {
-                  setEditing(null);
-                  setError("");
-                  setModal(true);
-                }}
-              >
-                <Plus size={16} />
-                Add {RECORD_LABEL[dataPage]}
-              </button>
-            )}
+            {!isViewer &&
+              page !== "Dashboard" &&
+              page !== SUMMARY &&
+              page !== LEDGER && (
+                <button
+                  className="primary"
+                  onClick={() => {
+                    setEditing(null);
+                    setError("");
+                    setModal(true);
+                  }}
+                >
+                  <Plus size={16} />
+                  Add {RECORD_LABEL[dataPage]}
+                </button>
+              )}
 
             <span className="live-dot">● Connected</span>
 
@@ -2200,7 +2424,7 @@ export default function App() {
                 ]
                   .filter(
                     ([title]) =>
-                      isOwner ||
+                      canSeeFinance ||
                       ["Total sales", "Total purchases"].includes(title),
                   )
                   .map(([title, value, color]) => (
@@ -2218,7 +2442,7 @@ export default function App() {
                   ))}
               </div>
 
-              {isOwner && (
+              {canSeeFinance && (
                 <div className="panel">
                   <div className="panel-head">
                     <div>
@@ -2374,6 +2598,15 @@ export default function App() {
                           onSort={sortT}
                         />
                         <SortTh
+                          label="Purchase rate"
+                          k="prate"
+                          kind="num"
+                          right
+                          sort={tSort}
+                          onSort={sortT}
+                          title="Purchase rate per qtl"
+                        />
+                        <SortTh
                           label="Purchase total"
                           k="ptotal"
                           kind="num"
@@ -2404,6 +2637,15 @@ export default function App() {
                           onSort={sortT}
                         />
                         <SortTh
+                          label="Sale rate"
+                          k="srate"
+                          kind="num"
+                          right
+                          sort={tSort}
+                          onSort={sortT}
+                          title="Sale rate per qtl"
+                        />
+                        <SortTh
                           label="Sale total"
                           k="stotal"
                           kind="num"
@@ -2418,6 +2660,7 @@ export default function App() {
                           right
                           sort={tSort}
                           onSort={sortT}
+                          title="Days from unload to payment received (still counting while unpaid)"
                         />
                         {isOwner && (
                           <>
@@ -2468,6 +2711,9 @@ export default function App() {
                             {r.p ? qty(r.p.quantity) : "—"}
                           </td>
                           <td className="num">
+                            {r.p && r.p.rate != null ? money(r.p.rate) : "—"}
+                          </td>
+                          <td className="num">
                             {r.p ? money(r.p.purchase_total) : "—"}
                           </td>
                           <td>
@@ -2478,9 +2724,16 @@ export default function App() {
                             {r.s ? qty(r.s.quantity) : "—"}
                           </td>
                           <td className="num">
+                            {r.s && r.s.rate != null ? money(r.s.rate) : "—"}
+                          </td>
+                          <td className="num">
                             {r.s ? money(r.s.gross_total) : "—"}
                           </td>
-                          <td className="num">{r.days ?? "—"}</td>
+                          <td className="num">
+                            {r.days == null
+                              ? "—"
+                              : `${r.days}${r.daysPending ? " · pending" : ""}`}
+                          </td>
                           {isOwner && (
                             <>
                               <td className="num">
@@ -2743,9 +2996,9 @@ export default function App() {
                           <td>{r.account_name || "—"}</td>
                           <td>
                             <span
-                              className={`status-pill ${r.paid_date ? "sold" : "pending"}`}
+                              className={`status-pill ${isRentPaid(r) ? "sold" : "pending"}`}
                             >
-                              {r.paid_date ? "Paid" : "Unpaid"}
+                              {isRentPaid(r) ? "Paid" : "Unpaid"}
                             </span>
                           </td>
                           <td>
@@ -3446,7 +3699,7 @@ export default function App() {
                           />
                         ))}
 
-                        <th>Actions</th>
+                        {!isViewer && <th>Actions</th>}
                       </tr>
                     </thead>
 
@@ -3454,30 +3707,34 @@ export default function App() {
                       {filtered.map((record) => (
                         <tr key={record.id}>
                           {columns[page].map((key) => (
-                            <td key={key}>{display(key, record[key])}</td>
+                            <td key={key}>
+                              {display(key, record[key], record)}
+                            </td>
                           ))}
 
-                          <td>
-                            <div className="row-actions">
-                              <button
-                                onClick={() => {
-                                  setEditing(record);
-                                  setError("");
-                                  setModal(true);
-                                }}
-                                title="Edit"
-                              >
-                                <Edit3 size={16} />
-                              </button>
+                          {!isViewer && (
+                            <td>
+                              <div className="row-actions">
+                                <button
+                                  onClick={() => {
+                                    setEditing(record);
+                                    setError("");
+                                    setModal(true);
+                                  }}
+                                  title="Edit"
+                                >
+                                  <Edit3 size={16} />
+                                </button>
 
-                              <button
-                                onClick={() => remove(record.id)}
-                                title="Delete"
-                              >
-                                <Trash2 size={16} />
-                              </button>
-                            </div>
-                          </td>
+                                <button
+                                  onClick={() => remove(record.id)}
+                                  title="Delete"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              </div>
+                            </td>
+                          )}
                         </tr>
                       ))}
                     </tbody>
@@ -3544,7 +3801,7 @@ export default function App() {
 
       {/* ADD / EDIT MODAL */}
 
-      {modal && (
+      {modal && !isViewer && (
         <div className="modal-backdrop" onClick={() => setModal(false)}>
           <form
             className="modal"
@@ -3616,7 +3873,11 @@ export default function App() {
                       step={type === "number" ? "any" : undefined}
                       defaultValue={
                         editing?.[key] ??
-                        (type === "date" && key !== "paid_date" ? today() : "")
+                        (type === "date" &&
+                        key !== "paid_date" &&
+                        key !== "unload_date"
+                          ? today()
+                          : "")
                       }
                       required={required}
                       list={

@@ -130,10 +130,21 @@ async function requireAuth(req, res, next) {
 // Protect all API routes.
 app.use("/api", requireAuth);
 
+// View-only accounts: reading is allowed, any change is refused.
+app.use("/api", (req, res, next) => {
+  if (isViewer(req) && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+    return res.status(403).json({ error: "This account is view only." });
+  }
+  next();
+});
+
 // The owner is a user whose Supabase app_metadata has role = "owner".
 // app_metadata can only be changed from the Supabase dashboard / SQL,
 // never by the user, so it is safe to trust.
 const isOwner = (req) => req.user?.app_metadata?.role === "owner";
+
+// A viewer (app_metadata.role = "viewer") can read but never change anything.
+const isViewer = (req) => req.user?.app_metadata?.role === "viewer";
 
 // Businesses shown as folders in the sidebar.
 const BUSINESSES = ["DDGS", "Maize and Turmeric"];
@@ -168,7 +179,6 @@ const resources = {
       "quantity",
       "rate",
       "purchase_total",
-      "seller",
       "notes",
     ],
   },
@@ -196,6 +206,7 @@ const resources = {
     table: "payments",
     scoped: true,
     ownerOnly: true,
+    viewerCanRead: true, // view-only accounts may read payments (GET only)
     fields: [
       "company_id",
       "payment_date",
@@ -250,7 +261,7 @@ for (const [key, config] of Object.entries(resources)) {
   // payments and vehicle rents: owner only
   if (config.ownerOnly) {
     app.use(`/api/${key}`, (req, res, next) =>
-      isOwner(req)
+      isOwner(req) || (config.viewerCanRead && isViewer(req))
         ? next()
         : res.status(403).json({ error: "Only the owner can access this." }),
     );
@@ -421,7 +432,8 @@ app.get("/api/dashboard", async (req, res) => {
 
     const scope = (query) =>
       business ? query.eq("business", business) : query;
-    const owner = isOwner(req);
+    // owner and view-only accounts see the payment figures
+    const owner = isOwner(req) || isViewer(req);
 
     const [p, s, received, paid] = await Promise.all([
       scope(db.from("purchases").select("purchase_total")),
@@ -460,7 +472,7 @@ app.get("/api/dashboard", async (req, res) => {
     const collected = sum(received.data, "amount");
     const disbursed = sum(paid.data, "amount");
 
-    // payment figures are for the owner only
+    // other users get sales and purchases only
     if (!owner) {
       return res.json({ sales, purchases });
     }
