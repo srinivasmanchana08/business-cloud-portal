@@ -130,6 +130,11 @@ async function requireAuth(req, res, next) {
 // Protect all API routes.
 app.use("/api", requireAuth);
 
+// The owner is a user whose Supabase app_metadata has role = "owner".
+// app_metadata can only be changed from the Supabase dashboard / SQL,
+// never by the user, so it is safe to trust.
+const isOwner = (req) => req.user?.app_metadata?.role === "owner";
+
 // Businesses shown as folders in the sidebar.
 const BUSINESSES = ["DDGS", "Maize and Turmeric"];
 
@@ -190,6 +195,7 @@ const resources = {
   payments: {
     table: "payments",
     scoped: true,
+    ownerOnly: true,
     fields: [
       "company_id",
       "payment_date",
@@ -205,6 +211,7 @@ const resources = {
   rents: {
     table: "vehicle_rents",
     scoped: true,
+    ownerOnly: true,
     fields: [
       "company_id",
       "entry_date",
@@ -239,6 +246,15 @@ function getPayload(fields, body) {
 
 for (const [key, config] of Object.entries(resources)) {
   const { table, fields } = config;
+
+  // payments and vehicle rents: owner only
+  if (config.ownerOnly) {
+    app.use(`/api/${key}`, (req, res, next) =>
+      isOwner(req)
+        ? next()
+        : res.status(403).json({ error: "Only the owner can access this." }),
+    );
+  }
 
   // GET RECORDS
   app.get(`/api/${key}`, async (req, res) => {
@@ -337,11 +353,20 @@ for (const [key, config] of Object.entries(resources)) {
         .eq("id", req.params.id)
         .eq("owner_id", req.user.id)
         .select()
-        .single();
+        .maybeSingle();
 
       if (error) {
         console.error(`PUT ${key}:`, error.message);
         return res.status(400).json({ error: error.message });
+      }
+
+      // nothing updated: the record was already deleted (another tab / double
+      // click) or belongs to another user
+      if (!data) {
+        return res.status(404).json({
+          error:
+            "This record no longer exists. Refresh the page and try again.",
+        });
       }
 
       return res.json(data);
@@ -359,17 +384,18 @@ for (const [key, config] of Object.entries(resources)) {
         .delete()
         .eq("id", req.params.id)
         .eq("owner_id", req.user.id)
-        .select("id")
-        .single();
+        .select("id");
 
       if (error) {
         console.error(`DELETE ${key}:`, error.message);
         return res.status(400).json({ error: error.message });
       }
 
+      // deleting a record that is already gone is not an error
       return res.json({
         success: true,
-        id: data.id,
+        id: req.params.id,
+        deleted: (data || []).length,
       });
     } catch (error) {
       console.error(`DELETE ${key}:`, error.message);
@@ -395,15 +421,22 @@ app.get("/api/dashboard", async (req, res) => {
 
     const scope = (query) =>
       business ? query.eq("business", business) : query;
+    const owner = isOwner(req);
 
     const [p, s, received, paid] = await Promise.all([
       scope(db.from("purchases").select("purchase_total")),
 
       scope(db.from("sales").select("gross_total")),
 
-      scope(db.from("payments").select("amount").eq("direction", "received")),
+      owner
+        ? scope(
+            db.from("payments").select("amount").eq("direction", "received"),
+          )
+        : Promise.resolve({ data: [], error: null }),
 
-      scope(db.from("payments").select("amount").eq("direction", "paid")),
+      owner
+        ? scope(db.from("payments").select("amount").eq("direction", "paid"))
+        : Promise.resolve({ data: [], error: null }),
     ]);
 
     const errors = [p.error, s.error, received.error, paid.error].filter(
@@ -426,6 +459,11 @@ app.get("/api/dashboard", async (req, res) => {
 
     const collected = sum(received.data, "amount");
     const disbursed = sum(paid.data, "amount");
+
+    // payment figures are for the owner only
+    if (!owner) {
+      return res.json({ sales, purchases });
+    }
 
     return res.json({
       sales,

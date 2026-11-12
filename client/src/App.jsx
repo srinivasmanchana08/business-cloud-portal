@@ -107,6 +107,10 @@ const folders = [
   },
 ];
 
+// Pages only the owner can open (also enforced by the API and Supabase RLS)
+const OWNER_ONLY_PAGES = ["Payments", "Company Summary", "Vehicle Rent"];
+const OWNER_ONLY_LISTS = ["Payments", "Rents"];
+
 // Sidebar is always listed A to Z (pages inside each folder too)
 const byName = (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" });
 nav.sort(([a], [b]) => byName(a, b));
@@ -559,26 +563,34 @@ export default function App() {
 
       if (page === TRACK) {
         // rent is needed here to deduct it from the margin
-        ["Purchases", "Sales", "Rents"].forEach((p) =>
+        allowedLists(["Purchases", "Sales", "Rents"]).forEach((p) =>
           dispatch(fetchList({ api, page: p, force, business: biz })),
         );
       } else if (page === RENT) {
-        ["Rents", "Purchases"].forEach((p) =>
+        allowedLists(["Rents", "Purchases"]).forEach((p) =>
           dispatch(fetchList({ api, page: p, force, business: biz })),
         );
       } else if (page === SUMMARY || page === LEDGER) {
-        ["Purchases", "Sales", "Payments"].forEach((p) =>
+        allowedLists(["Purchases", "Sales", "Payments"]).forEach((p) =>
           dispatch(fetchList({ api, page: p, force, business: biz })),
         );
-      } else if (page !== "Dashboard" && page !== "Companies") {
+      } else if (
+        page !== "Dashboard" &&
+        page !== "Companies" &&
+        allowedLists([page]).length
+      ) {
         dispatch(fetchList({ api, page, force, business: biz }));
       }
     },
-    [session, page, biz, api, dispatch],
+    [session, page, biz, api, dispatch, isOwner],
   );
 
   // ---- first load after sign-in: fetch everything before showing the app
   const userId = session?.user?.id || null;
+  // set in Supabase: app_metadata -> { "role": "owner" } (see owner_permissions.sql)
+  const isOwner = session?.user?.app_metadata?.role === "owner";
+  const allowedLists = (lists) =>
+    lists.filter((p) => isOwner || !OWNER_ONLY_LISTS.includes(p));
   const [bootedFor, setBootedFor] = useState(null);
   const [bootProgress, setBootProgress] = useState({ done: 0, total: 1 });
   const [bootSlow, setBootSlow] = useState(false);
@@ -598,7 +610,7 @@ export default function App() {
     ];
 
     folders.forEach((f) =>
-      ["Purchases", "Sales", "Payments", "Rents"].forEach((p) =>
+      allowedLists(["Purchases", "Sales", "Payments", "Rents"]).forEach((p) =>
         jobs.push(fetchList({ api, page: p, force: true, business: f.name })),
       ),
     );
@@ -624,6 +636,14 @@ export default function App() {
     // runs once per signed-in user (not on token refresh)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
+
+  useEffect(() => {
+    if (session && !isOwner && OWNER_ONLY_PAGES.includes(page)) {
+      dispatch(setBusiness(""));
+      setBiz("");
+      setPage("Dashboard");
+    }
+  }, [session, isOwner, page, dispatch]);
 
   useEffect(() => {
     if (session) {
@@ -1544,6 +1564,17 @@ export default function App() {
                 ? sCompany
                 : filters?.company;
       spec.company = companyMap[companyId] || "";
+
+      if (page === TRACK && !isOwner) {
+        const keep = spec.headers.map(
+          (h) => h !== "Vehicle rent" && h !== "Margin",
+        );
+        const pick = (arr) => arr.filter((_, i) => keep[i]);
+        spec.headers = pick(spec.headers);
+        spec.kinds = pick(spec.kinds);
+        spec.rows = spec.rows.map(pick);
+        if (spec.totalsRow) spec.totalsRow = pick(spec.totalsRow);
+      }
       if (type === "pdf") await exportPdf(spec);
       else await exportExcel(spec);
     } catch (err) {
@@ -1846,6 +1877,7 @@ export default function App() {
       ).unwrap();
     } catch (err) {
       setError(getErrorMessage(err));
+      refresh(true);
     } finally {
       setBusy(false);
     }
@@ -1999,8 +2031,11 @@ export default function App() {
 
               {folders.map((folder) => {
                 const open = Boolean(openFolders[folder.name]);
+                const items = folder.items.filter(
+                  ([n]) => isOwner || !OWNER_ONLY_PAGES.includes(n),
+                );
                 const holdsPage =
-                  biz === folder.name && folder.items.some(([n]) => n === page);
+                  biz === folder.name && items.some(([n]) => n === page);
                 const FolderIcon = open ? FolderOpen : Folder;
 
                 return (
@@ -2023,8 +2058,8 @@ export default function App() {
 
                     {open && (
                       <div className="nav-sub">
-                        {folder.items.length ? (
-                          folder.items.map(([name, Icon]) => (
+                        {items.length ? (
+                          items.map(([name, Icon]) => (
                             <button
                               key={name}
                               className={`nav-item ${
@@ -2162,34 +2197,42 @@ export default function App() {
                   ["Payments paid", stats?.disbursed, "amber"],
                   ["Receivable balance", stats?.receivable, "green"],
                   ["Payable balance", stats?.payable, "red"],
-                ].map(([title, value, color]) => (
-                  <div className="stat-card" key={title}>
-                    <span>{title}</span>
+                ]
+                  .filter(
+                    ([title]) =>
+                      isOwner ||
+                      ["Total sales", "Total purchases"].includes(title),
+                  )
+                  .map(([title, value, color]) => (
+                    <div className="stat-card" key={title}>
+                      <span>{title}</span>
 
-                    <strong>{money(value)}</strong>
+                      <strong>{money(value)}</strong>
 
-                    <small>All recorded transactions</small>
+                      <small>All recorded transactions</small>
 
-                    <div className={`stat-icon ${color}`}>
-                      <Wallet size={18} />
+                      <div className={`stat-icon ${color}`}>
+                        <Wallet size={18} />
+                      </div>
+                    </div>
+                  ))}
+              </div>
+
+              {isOwner && (
+                <div className="panel">
+                  <div className="panel-head">
+                    <div>
+                      <h3>Net cash position</h3>
+
+                      <p className="muted">
+                        Payments received minus payments paid
+                      </p>
                     </div>
                   </div>
-                ))}
-              </div>
 
-              <div className="panel">
-                <div className="panel-head">
-                  <div>
-                    <h3>Net cash position</h3>
-
-                    <p className="muted">
-                      Payments received minus payments paid
-                    </p>
-                  </div>
+                  <div className="net-value">{money(stats?.net)}</div>
                 </div>
-
-                <div className="net-value">{money(stats?.net)}</div>
-              </div>
+              )}
             </>
           ) : page === TRACK ? (
             /* VEHICLE TRACKING */
@@ -2376,23 +2419,27 @@ export default function App() {
                           sort={tSort}
                           onSort={sortT}
                         />
-                        <SortTh
-                          label="Rent"
-                          k="rent"
-                          kind="num"
-                          right
-                          sort={tSort}
-                          onSort={sortT}
-                        />
-                        <SortTh
-                          label="Margin"
-                          k="margin"
-                          kind="num"
-                          right
-                          sort={tSort}
-                          onSort={sortT}
-                          title="Sale total - purchase total - vehicle rent"
-                        />
+                        {isOwner && (
+                          <>
+                            <SortTh
+                              label="Rent"
+                              k="rent"
+                              kind="num"
+                              right
+                              sort={tSort}
+                              onSort={sortT}
+                            />
+                            <SortTh
+                              label="Margin"
+                              k="margin"
+                              kind="num"
+                              right
+                              sort={tSort}
+                              onSort={sortT}
+                              title="Sale total - purchase total - vehicle rent"
+                            />
+                          </>
+                        )}
                         <SortTh
                           label="Status"
                           k="status"
@@ -2434,14 +2481,18 @@ export default function App() {
                             {r.s ? money(r.s.gross_total) : "—"}
                           </td>
                           <td className="num">{r.days ?? "—"}</td>
-                          <td className="num">
-                            {r.rent ? money(r.rent) : "—"}
-                          </td>
-                          <td
-                            className={`num ${r.margin > 0 ? "due-in" : r.margin < 0 ? "due-out" : ""}`}
-                          >
-                            {r.margin === null ? "—" : money(r.margin)}
-                          </td>
+                          {isOwner && (
+                            <>
+                              <td className="num">
+                                {r.rent ? money(r.rent) : "—"}
+                              </td>
+                              <td
+                                className={`num ${r.margin > 0 ? "due-in" : r.margin < 0 ? "due-out" : ""}`}
+                              >
+                                {r.margin === null ? "—" : money(r.margin)}
+                              </td>
+                            </>
+                          )}
                           <td>
                             <span
                               className={`status-pill ${r.status === "Sold" ? "sold" : r.status === "Pending" ? "pending" : "orphan"}`}
@@ -2489,14 +2540,18 @@ export default function App() {
                       <span>Sale total</span>
                       <b>{money(tracking.totals.sTotal)}</b>
                     </div>
-                    <div>
-                      <span>Vehicle rent</span>
-                      <b>{money(tracking.totals.rent)}</b>
-                    </div>
-                    <div>
-                      <span>Margin (sold, after rent)</span>
-                      <b>{money(tracking.totals.margin)}</b>
-                    </div>
+                    {isOwner && (
+                      <>
+                        <div>
+                          <span>Vehicle rent</span>
+                          <b>{money(tracking.totals.rent)}</b>
+                        </div>
+                        <div>
+                          <span>Margin (sold, after rent)</span>
+                          <b>{money(tracking.totals.margin)}</b>
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
               )}
