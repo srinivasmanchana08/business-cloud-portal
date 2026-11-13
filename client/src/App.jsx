@@ -327,9 +327,9 @@ const DATE_KEYS = [
 ];
 
 const DEFAULT_SORT = {
-  Purchases: { key: "entry_date", dir: "desc" },
-  Sales: { key: "entry_date", dir: "desc" },
-  Payments: { key: "payment_date", dir: "desc" },
+  Purchases: { key: "entry_date", dir: "asc" },
+  Sales: { key: "entry_date", dir: "asc" },
+  Payments: { key: "payment_date", dir: "asc" },
 };
 const NO_SORT = { key: "", dir: "asc" };
 
@@ -548,7 +548,7 @@ export default function App() {
   const [tFrom, setTFrom] = useState("");
   const [tTo, setTTo] = useState("");
   const [tStatus, setTStatus] = useState("");
-  const [tSort, setTSort] = useState({ key: "pdate", dir: "desc" });
+  const [tSort, setTSort] = useState({ key: "pdate", dir: "asc" });
 
   // Vehicle Rent filters
   const [rCompany, setRCompany] = useState("");
@@ -556,7 +556,7 @@ export default function App() {
   const [rFrom, setRFrom] = useState("");
   const [rTo, setRTo] = useState("");
   const [rStatus, setRStatus] = useState("");
-  const [rSort, setRSort] = useState({ key: "entry_date", dir: "desc" });
+  const [rSort, setRSort] = useState({ key: "entry_date", dir: "asc" });
 
   // Company Summary + generic table sorting
   const [sSort, setSSort] = useState({ key: "name", dir: "asc" });
@@ -566,7 +566,7 @@ export default function App() {
   const [lType, setLType] = useState("");
   const [lFrom, setLFrom] = useState("");
   const [lTo, setLTo] = useState("");
-  const [lSort, setLSort] = useState({ key: "date", dir: "desc" });
+  const [lSort, setLSort] = useState({ key: "date", dir: "asc" });
   const sortL = (k, d) => setLSort((c) => nextSort(c, k, d));
   const [dataSorts, setDataSorts] = useState({});
   const dataSort = dataSorts[page] || DEFAULT_SORT[page] || NO_SORT;
@@ -839,6 +839,27 @@ export default function App() {
   const companyMap = useMemo(
     () => Object.fromEntries(companies.map((c) => [c.id, c.name])),
     [companies],
+  );
+
+  // company dropdowns are always A to Z
+  const companyOptions = useMemo(
+    () =>
+      [...companies].sort((a, b) =>
+        String(a.name).localeCompare(String(b.name), undefined, {
+          sensitivity: "base",
+        }),
+      ),
+    [companies],
+  );
+
+  // Purchases are from suppliers, sales are to customers ("Both" is in each list)
+  const suppliers = useMemo(
+    () => companyOptions.filter((c) => c.company_type !== "Customer"),
+    [companyOptions],
+  );
+  const customers = useMemo(
+    () => companyOptions.filter((c) => c.company_type !== "Supplier"),
+    [companyOptions],
   );
 
   const dateKey = DATE_KEY[page];
@@ -1865,7 +1886,6 @@ export default function App() {
       ["entry_date", "Date", "date", true],
       ["voucher_no", "Voucher no.", "text"],
       ["vehicle_number", "Vehicle number", "text"],
-      ["particulars", "Particulars", "text"],
       ["quantity", "Quantity (qtl)", "number"],
       ["rate", "Rate", "number"],
       ["purchase_total", "Purchase total (₹)", "number"],
@@ -1883,7 +1903,6 @@ export default function App() {
       ["unload_date", "Unload date", "date"],
       ["unload_quantity", "Unload quantity (qtl)", "number"],
       ["payment_due_date", "Payment due date", "date"],
-      ["purchase_reference", "Purchase reference", "text"],
       ["notes", "Notes", "text"],
     ],
 
@@ -2299,30 +2318,6 @@ export default function App() {
             </>
           );
         })()}
-
-        <div className="sidebar-bottom">
-          <div className="user-chip">
-            <div className="avatar">
-              {session.user.email?.[0]?.toUpperCase()}
-            </div>
-
-            <div>
-              <b>
-                {isViewer
-                  ? "Account · View only"
-                  : isOwner
-                    ? "Account · Owner"
-                    : "Account"}
-              </b>
-              <small>{session.user.email}</small>
-            </div>
-          </div>
-
-          <button className="nav-item" onClick={logout}>
-            <LogOut size={18} />
-            Sign out
-          </button>
-        </div>
       </aside>
 
       {/* MAIN CONTENT */}
@@ -2383,7 +2378,9 @@ export default function App() {
                 </button>
               )}
 
-            <span className="live-dot">● Connected</span>
+            <span className="top-email" title={session.user.email}>
+              {session.user.email}
+            </span>
 
             <button
               className="icon-btn"
@@ -2392,6 +2389,15 @@ export default function App() {
               disabled={busy || Boolean(list?.loading) || summaryLoading}
             >
               <RefreshCw size={17} />
+            </button>
+
+            <button
+              className="icon-btn"
+              onClick={logout}
+              title="Sign out"
+              aria-label="Sign out"
+            >
+              <LogOut size={17} />
             </button>
           </div>
         </header>
@@ -2486,7 +2492,7 @@ export default function App() {
                     onChange={(e) => setTPCompany(e.target.value)}
                   >
                     <option value="">All companies</option>
-                    {companies.map((c) => (
+                    {suppliers.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.name}
                       </option>
@@ -2501,7 +2507,7 @@ export default function App() {
                     onChange={(e) => setTSCompany(e.target.value)}
                   >
                     <option value="">All companies</option>
-                    {companies.map((c) => (
+                    {customers.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.name}
                       </option>
@@ -2767,7 +2773,7 @@ export default function App() {
               )}
 
               {!summaryFirstLoad && (
-                <div className="totals-bar">
+                <div className="totals-bar one-line">
                   <div className="totals-label">
                     {trackFiltered ? "Filtered totals" : "Totals"}
                     <small>
@@ -2837,7 +2843,7 @@ export default function App() {
                     onChange={(e) => setRCompany(e.target.value)}
                   >
                     <option value="">All companies</option>
-                    {companies.map((c) => (
+                    {companyOptions.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.name}
                       </option>
@@ -3045,7 +3051,7 @@ export default function App() {
               )}
 
               {!(rentsList.loading && !rentsList.loaded) && (
-                <div className="totals-bar">
+                <div className="totals-bar one-line">
                   <div className="totals-label">
                     {rentFiltered ? "Filtered totals" : "Totals"}
                     <small>
@@ -3101,7 +3107,7 @@ export default function App() {
                     onChange={(e) => setLCompany(e.target.value)}
                   >
                     <option value="">All companies</option>
-                    {companies.map((c) => (
+                    {companyOptions.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.name}
                       </option>
@@ -3328,7 +3334,7 @@ export default function App() {
                     onChange={(e) => setSCompany(e.target.value)}
                   >
                     <option value="">All companies</option>
-                    {companies.map((c) => (
+                    {companyOptions.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.name}
                       </option>
@@ -3527,7 +3533,7 @@ export default function App() {
               )}
 
               {!summaryFirstLoad && (
-                <div className="totals-bar">
+                <div className="totals-bar one-line">
                   <div className="totals-label">
                     {sCompany || sFrom || sTo || search
                       ? "Filtered totals"
@@ -3593,7 +3599,12 @@ export default function App() {
                         }
                       >
                         <option value="">All companies</option>
-                        {companies.map((c) => (
+                        {(page === "Purchases"
+                          ? suppliers
+                          : page === "Sales"
+                            ? customers
+                            : companyOptions
+                        ).map((c) => (
                           <option key={c.id} value={c.id}>
                             {c.name}
                           </option>
@@ -3751,7 +3762,7 @@ export default function App() {
               )}
 
               {hasFilters && !firstLoad && (
-                <div className="totals-bar">
+                <div className="totals-bar one-line">
                   <div className="totals-label">
                     {activeFilterCount > 0 || search
                       ? "Filtered totals"
@@ -3842,7 +3853,7 @@ export default function App() {
                     >
                       <option value="">Select company</option>
 
-                      {companies.map((company) => (
+                      {companyOptions.map((company) => (
                         <option value={company.id} key={company.id}>
                           {company.name}
                         </option>
