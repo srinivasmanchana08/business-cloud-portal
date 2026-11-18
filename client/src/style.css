@@ -994,3 +994,40 @@
 .totals-bar.one-line .totals-items b {
   font-size: 13px;
 }
+
+/* ---------- Payment Dues page ---------- */
+
+.dues-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.dues-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dues-head h3 {
+  margin: 0;
+}
+
+.dues-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.dues-panel .table-wrap {
+  max-height: calc(100vh - 300px);
+  overflow: auto;
+}
+
+@media (max-width: 900px) {
+  .dues-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

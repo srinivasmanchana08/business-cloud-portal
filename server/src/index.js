@@ -217,6 +217,23 @@ const resources = {
     ],
   },
 
+  // Purchase orders placed with suppliers. Exposed as /api/orders
+  orders: {
+    table: "purchase_orders",
+    scoped: true,
+    fields: [
+      "company_id",
+      "order_date",
+      "po_number",
+      "quantity",
+      "rate",
+      "order_total",
+      "delivery_date",
+      "status",
+      "notes",
+    ],
+  },
+
   // Vehicle rent paid to a transporter for a purchase vehicle.
   // Exposed as /api/rents
   rents: {

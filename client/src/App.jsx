@@ -31,6 +31,8 @@ import {
   Scale,
   Truck,
   Banknote,
+  ClipboardList,
+  ListChecks,
   BookOpen,
   Folder,
   FolderOpen,
@@ -73,6 +75,12 @@ const auth = createClient(SUPABASE_URL, SUPABASE_KEY);
 // 3. NAVIGATION
 // =====================================================
 
+// Names shown on screen when they differ from the page id
+const PAGE_LABEL = {
+  Orders: "Purchase Orders",
+  Dues: "Payment Dues",
+};
+
 // Pages shown directly in the sidebar
 const nav = [
   ["Dashboard", LayoutDashboard],
@@ -91,6 +99,8 @@ const folders = [
       ["Company Summary", Scale],
       ["Vehicle Tracking", Truck],
       ["Vehicle Rent", Banknote],
+      ["Orders", ClipboardList],
+      ["Dues", ListChecks],
     ],
   },
   {
@@ -103,6 +113,8 @@ const folders = [
       ["Company Summary", Scale],
       ["Vehicle Tracking", Truck],
       ["Vehicle Rent", Banknote],
+      ["Orders", ClipboardList],
+      ["Dues", ListChecks],
     ],
   },
 ];
@@ -134,9 +146,12 @@ const VIEWER_HIDDEN_PAGES = ["Companies"];
 
 // Sidebar is always listed A to Z (pages inside each folder too)
 const byName = (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" });
-nav.sort(([a], [b]) => byName(a, b));
+const labelOf = (id) => PAGE_LABEL[id] || id;
+nav.sort(([a], [b]) => byName(labelOf(a), labelOf(b)));
 folders.sort((a, b) => byName(a.name, b.name));
-folders.forEach((f) => f.items.sort(([a], [b]) => byName(a, b)));
+folders.forEach((f) =>
+  f.items.sort(([a], [b]) => byName(labelOf(a), labelOf(b))),
+);
 
 // =====================================================
 // 4. HELPERS
@@ -165,17 +180,20 @@ const DATE_KEY = {
   Purchases: "entry_date",
   Sales: "entry_date",
   Payments: "payment_date",
+  Orders: "order_date",
 };
 
 const TOTAL_KEY = {
   Purchases: "purchase_total",
   Sales: "gross_total",
+  Orders: "order_total",
 };
 
 const SUMMARY = "Company Summary";
 const LEDGER = "Ledger";
 const TRACK = "Vehicle Tracking";
 const RENT = "Vehicle Rent";
+const DUES = "Dues";
 
 // singular names used on the "Add ..." button and the modal title
 const RECORD_LABEL = {
@@ -184,6 +202,7 @@ const RECORD_LABEL = {
   Sales: "Sale",
   Payments: "Payment",
   Rents: "Vehicle rent",
+  Orders: "Purchase order",
 };
 
 // vehicle numbers compared without spaces / dashes / case
@@ -315,6 +334,7 @@ const NUMERIC_KEYS = [
   "credit_days",
   "unload_quantity",
   "pay_days",
+  "order_total",
 ];
 const DATE_KEYS = [
   "entry_date",
@@ -324,6 +344,8 @@ const DATE_KEYS = [
   "paid_date",
   "pay_received",
   "paid_on",
+  "order_date",
+  "delivery_date",
 ];
 
 const DEFAULT_SORT = {
@@ -568,6 +590,12 @@ export default function App() {
   const [lTo, setLTo] = useState("");
   const [lSort, setLSort] = useState({ key: "date", dir: "asc" });
   const sortL = (k, d) => setLSort((c) => nextSort(c, k, d));
+
+  // Payment Dues page: two simple lists
+  const [dueSort, setDueSort] = useState({ key: "name", dir: "asc" });
+  const [paySort, setPaySort] = useState({ key: "name", dir: "asc" });
+  const sortDue = (k, d) => setDueSort((c) => nextSort(c, k, d));
+  const sortPay = (k, d) => setPaySort((c) => nextSort(c, k, d));
   const [dataSorts, setDataSorts] = useState({});
   const dataSort = dataSorts[page] || DEFAULT_SORT[page] || NO_SORT;
 
@@ -744,7 +772,7 @@ export default function App() {
         allowedLists(["Rents", "Purchases"]).forEach((p) =>
           dispatch(fetchList({ api, page: p, force, business: biz })),
         );
-      } else if (page === SUMMARY || page === LEDGER) {
+      } else if (page === SUMMARY || page === LEDGER || page === DUES) {
         allowedLists(["Purchases", "Sales", "Payments"]).forEach((p) =>
           dispatch(fetchList({ api, page: p, force, business: biz })),
         );
@@ -785,7 +813,13 @@ export default function App() {
     ];
 
     folders.forEach((f) =>
-      allowedLists(["Purchases", "Sales", "Payments", "Rents"]).forEach((p) =>
+      allowedLists([
+        "Purchases",
+        "Sales",
+        "Payments",
+        "Rents",
+        "Orders",
+      ]).forEach((p) =>
         jobs.push(fetchList({ api, page: p, force: true, business: f.name })),
       ),
     );
@@ -1419,6 +1453,74 @@ export default function App() {
   const ledgerFiltered = Boolean(lCompany || lType || lFrom || lTo || search);
 
   // ===================================================
+  // 10c-4. PAYMENT DUES (what customers owe / what you owe suppliers)
+  // ===================================================
+
+  const duesView = useMemo(() => {
+    const map = {};
+    const co = (id) =>
+      (map[id] = map[id] || {
+        name: companyMap[id] || "—",
+        sales: 0,
+        received: 0,
+        purchases: 0,
+        paid: 0,
+      });
+
+    salesList.items.forEach((x) => {
+      co(x.company_id).sales += Number(x.gross_total || 0);
+    });
+    purchasesList.items.forEach((x) => {
+      co(x.company_id).purchases += Number(x.purchase_total || 0);
+    });
+    paymentsList.items.forEach((p) => {
+      const c = co(p.company_id);
+      if (p.direction === "received") c.received += Number(p.amount || 0);
+      else if (p.direction === "paid") c.paid += Number(p.amount || 0);
+    });
+
+    const q = search.trim().toLowerCase();
+    const all = Object.values(map).filter(
+      (c) => !q || c.name.toLowerCase().includes(q),
+    );
+
+    const toReceive = all
+      .map((c) => ({ name: c.name, amount: c.sales - c.received }))
+      .filter((c) => c.amount > 0.5);
+    const toPay = all
+      .map((c) => ({ name: c.name, amount: c.purchases - c.paid }))
+      .filter((c) => c.amount > 0.5);
+
+    const sum = (list) => list.reduce((t, c) => t + c.amount, 0);
+
+    return {
+      toReceive: sortRows(toReceive, (c) => c[dueSort.key], dueSort),
+      toPay: sortRows(toPay, (c) => c[paySort.key], paySort),
+      totalReceive: sum(toReceive),
+      totalPay: sum(toPay),
+      // one row per company for export
+      exportRows: all
+        .map((c) => [
+          c.name,
+          c.sales - c.received > 0.5 ? c.sales - c.received : null,
+          c.purchases - c.paid > 0.5 ? c.purchases - c.paid : null,
+        ])
+        .filter((r) => r[1] !== null || r[2] !== null)
+        .sort((a, b) =>
+          a[0].localeCompare(b[0], undefined, { sensitivity: "base" }),
+        ),
+    };
+  }, [
+    salesList,
+    purchasesList,
+    paymentsList,
+    companyMap,
+    search,
+    dueSort,
+    paySort,
+  ]);
+
+  // ===================================================
   // 10d. EXPORT (Excel / PDF) — exports exactly what is on screen
   // ===================================================
 
@@ -1510,6 +1612,22 @@ export default function App() {
           t.rent,
           t.margin,
           `${t.pending} pending`,
+        ],
+      };
+    }
+
+    // ---- Payment dues
+    if (page === DUES) {
+      return {
+        title: "Payment Dues",
+        filterText: search ? `Search: ${search}` : "",
+        headers: ["Company", "Payments due (to receive)", "Payments to pay"],
+        kinds: [null, "money", "money"],
+        rows: duesView.exportRows,
+        totalsRow: [
+          `Total (${duesView.exportRows.length} companies)`,
+          duesView.totalReceive,
+          duesView.totalPay,
         ],
       };
     }
@@ -1724,7 +1842,9 @@ export default function App() {
         ? "qty"
         : key === "pay_days"
           ? "int"
-          : ["rate", "gross_total", "purchase_total"].includes(key)
+          : ["rate", "gross_total", "purchase_total", "order_total"].includes(
+                key,
+              )
             ? "money"
             : null;
 
@@ -1740,7 +1860,7 @@ export default function App() {
     const totalKey = TOTAL_KEY[page];
 
     return {
-      title: page,
+      title: PAGE_LABEL[page] || page,
       filterText: parts.join(", "),
       headers: keys.map((k) =>
         (titleMap[k] || k.replaceAll("_", " ")).replace("₹", "Rs."),
@@ -1915,6 +2035,22 @@ export default function App() {
       ["notes", "Notes", "text"],
     ],
 
+    Orders: [
+      ["company_id", "Supplier", "company", true],
+      ["order_date", "Order date", "date", true],
+      ["po_number", "PO number", "text"],
+      ["quantity", "Quantity (qtl)", "number", true],
+      ["rate", "Rate (₹/qtl)", "number", true],
+      [
+        "order_total",
+        "Order total (₹) - leave empty to use quantity x rate",
+        "number",
+      ],
+      ["delivery_date", "Expected delivery date", "date"],
+      ["status", "Status", "select", true],
+      ["notes", "Notes", "text"],
+    ],
+
     Rents: [
       ["company_id", "Purchase company", "company", true],
       ["entry_date", "Purchase date", "date", true],
@@ -1942,6 +2078,17 @@ export default function App() {
       "rate",
       "purchase_total",
       "paid_on",
+    ],
+
+    Orders: [
+      "order_date",
+      "company_id",
+      "po_number",
+      "quantity",
+      "rate",
+      "order_total",
+      "delivery_date",
+      "status",
     ],
 
     Sales: [
@@ -1978,6 +2125,11 @@ export default function App() {
     pay_received: "Payment received",
     pay_days: "Days",
     paid_on: "Paid on",
+    order_date: "Order date",
+    po_number: "PO no",
+    order_total: "Order total",
+    delivery_date: "Delivery date",
+    status: "Status",
   };
 
   // ===================================================
@@ -1998,7 +2150,9 @@ export default function App() {
       return companyMap[value] || "—";
     }
 
-    if (["gross_total", "purchase_total", "amount"].includes(key)) {
+    if (
+      ["gross_total", "purchase_total", "amount", "order_total"].includes(key)
+    ) {
       return money(value);
     }
 
@@ -2029,6 +2183,7 @@ export default function App() {
       const body = Object.fromEntries(formData.entries());
 
       const numericFields = [
+        "order_total",
         "quantity",
         "rate",
         "purchase_total",
@@ -2040,6 +2195,7 @@ export default function App() {
 
       // NOT NULL numeric columns fall back to 0; optional text/date become null.
       const requiredNumeric = [
+        "order_total",
         "quantity",
         "rate",
         "purchase_total",
@@ -2065,6 +2221,11 @@ export default function App() {
           body[key] = null;
         }
       });
+
+      // order total defaults to quantity x rate
+      if (dataPage === "Orders" && !Number(body.order_total)) {
+        body.order_total = Number(body.quantity || 0) * Number(body.rate || 0);
+      }
 
       // a sale that has not been unloaded has no unload date or payment due date
       if (dataPage === "Sales" && Number(body.unload_quantity || 0) === 0) {
@@ -2259,7 +2420,7 @@ export default function App() {
                     onClick={() => goTo(name)}
                   >
                     <Icon size={18} />
-                    {name}
+                    {PAGE_LABEL[name] || name}
                   </button>
                 ))}
 
@@ -2304,7 +2465,7 @@ export default function App() {
                               onClick={() => goTo(name, folder.name)}
                             >
                               <Icon size={17} />
-                              {name}
+                              {PAGE_LABEL[name] || name}
                             </button>
                           ))
                         ) : (
@@ -2335,7 +2496,7 @@ export default function App() {
 
           <div>
             <span className="muted">{biz ? `${biz} / ` : "Workspace / "}</span>
-            <b>{page}</b>
+            <b>{PAGE_LABEL[page] || page}</b>
           </div>
 
           {page !== "Dashboard" && (
@@ -3081,6 +3242,141 @@ export default function App() {
                 </div>
               )}
             </div>
+          ) : page === DUES ? (
+            /* PAYMENT DUES — simple company + amount lists */
+
+            <div className="dues-page">
+              <div className="dues-head">
+                <h3>Payment dues</h3>
+                {exportButtons}
+              </div>
+
+              {summaryFirstLoad ? (
+                <p className="muted pad">Loading records...</p>
+              ) : (
+                <div className="dues-grid">
+                  <div className="panel dues-panel">
+                    <div className="table-toolbar">
+                      <div>
+                        <h3>Payments due</h3>
+                        <p className="muted">
+                          Customers who still have to pay you ·{" "}
+                          {duesView.toReceive.length}{" "}
+                          {duesView.toReceive.length === 1
+                            ? "company"
+                            : "companies"}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="table-wrap">
+                      <table className="summary-table">
+                        <thead>
+                          <tr>
+                            <SortTh
+                              label="Company"
+                              k="name"
+                              sort={dueSort}
+                              onSort={sortDue}
+                            />
+                            <SortTh
+                              label="Amount"
+                              k="amount"
+                              kind="num"
+                              right
+                              sort={dueSort}
+                              onSort={sortDue}
+                            />
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {duesView.toReceive.map((c) => (
+                            <tr key={c.name}>
+                              <td>{c.name}</td>
+                              <td className="num due-in">{money(c.amount)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+
+                      {!duesView.toReceive.length && (
+                        <p className="muted pad">Nothing pending.</p>
+                      )}
+                    </div>
+
+                    <div className="totals-bar one-line">
+                      <div className="totals-label">Total</div>
+                      <div className="totals-items">
+                        <div>
+                          <span>To receive</span>
+                          <b>{money(duesView.totalReceive)}</b>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="panel dues-panel">
+                    <div className="table-toolbar">
+                      <div>
+                        <h3>Payments to pay</h3>
+                        <p className="muted">
+                          Suppliers you still have to pay ·{" "}
+                          {duesView.toPay.length}{" "}
+                          {duesView.toPay.length === 1
+                            ? "company"
+                            : "companies"}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="table-wrap">
+                      <table className="summary-table">
+                        <thead>
+                          <tr>
+                            <SortTh
+                              label="Company"
+                              k="name"
+                              sort={paySort}
+                              onSort={sortPay}
+                            />
+                            <SortTh
+                              label="Amount"
+                              k="amount"
+                              kind="num"
+                              right
+                              sort={paySort}
+                              onSort={sortPay}
+                            />
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {duesView.toPay.map((c) => (
+                            <tr key={c.name}>
+                              <td>{c.name}</td>
+                              <td className="num due-out">{money(c.amount)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+
+                      {!duesView.toPay.length && (
+                        <p className="muted pad">Nothing pending.</p>
+                      )}
+                    </div>
+
+                    <div className="totals-bar one-line">
+                      <div className="totals-label">Total</div>
+                      <div className="totals-items">
+                        <div>
+                          <span>To pay</span>
+                          <b>{money(duesView.totalPay)}</b>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
           ) : page === LEDGER ? (
             /* LEDGER — purchases, sales and payments together */
 
@@ -3572,7 +3868,7 @@ export default function App() {
             <div className="panel fill">
               <div className="table-toolbar">
                 <div>
-                  <h3>{page} register</h3>
+                  <h3>{PAGE_LABEL[page] || page} register</h3>
 
                   <p className="muted">
                     {filtered.length} of {rows.length} records
@@ -3599,7 +3895,7 @@ export default function App() {
                         }
                       >
                         <option value="">All companies</option>
-                        {(page === "Purchases"
+                        {(page === "Purchases" || page === "Orders"
                           ? suppliers
                           : page === "Sales"
                             ? customers
@@ -3796,7 +4092,9 @@ export default function App() {
                           <span>
                             {page === "Sales"
                               ? "Total sales"
-                              : "Total purchases"}
+                              : page === "Orders"
+                                ? "Total order value"
+                                : "Total purchases"}
                           </span>
                           <b>{money(totals.amount)}</b>
                         </div>
@@ -3864,13 +4162,19 @@ export default function App() {
                       name={key}
                       defaultValue={
                         editing?.[key] ||
-                        (key === "company_type" ? "Both" : "received")
+                        (key === "company_type"
+                          ? "Both"
+                          : key === "status"
+                            ? "Open"
+                            : "received")
                       }
                       required={required}
                     >
                       {(key === "company_type"
                         ? ["Customer", "Supplier", "Both"]
-                        : ["received", "paid"]
+                        : key === "status"
+                          ? ["Open", "Delivered", "Cancelled"]
+                          : ["received", "paid"]
                       ).map((value) => (
                         <option key={value} value={value}>
                           {value}

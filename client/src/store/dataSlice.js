@@ -13,8 +13,9 @@ export const LIST_PAGES = [
   "Sales",
   "Payments",
   "Rents",
+  "Orders",
 ];
-export const FILTER_PAGES = ["Purchases", "Sales", "Payments"];
+export const FILTER_PAGES = ["Purchases", "Sales", "Payments", "Orders"];
 
 // Everything except Companies is kept separately per business
 // (the sidebar folders DDGS / Maize and Turmeric). "" = all businesses.
@@ -143,7 +144,7 @@ export const saveRecord = createAsyncThunk(
 
     // Refresh the list (and dashboard totals) so the cache is correct.
     const jobs = [dispatch(fetchList({ api, page, business, force: true }))];
-    if (page !== "Companies" && page !== "Rents") {
+    if (page !== "Companies" && page !== "Rents" && page !== "Orders") {
       jobs.push(dispatch(fetchStats({ api, business, force: true })));
       // the combined dashboard ("") also changes when a business changes
       if (business)
@@ -158,7 +159,7 @@ export const deleteRecord = createAsyncThunk(
   async ({ api, page, id, business }, { dispatch }) => {
     await api(`${page.toLowerCase()}/${id}`, { method: "DELETE" });
 
-    if (page !== "Companies" && page !== "Rents") {
+    if (page !== "Companies" && page !== "Rents" && page !== "Orders") {
       dispatch(fetchStats({ api, business, force: true }));
       if (business) dispatch(fetchStats({ api, business: "", force: true }));
     }
