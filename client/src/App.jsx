@@ -1484,12 +1484,22 @@ export default function App() {
       (c) => !q || c.name.toLowerCase().includes(q),
     );
 
-    const toReceive = all
-      .map((c) => ({ name: c.name, amount: c.sales - c.received }))
-      .filter((c) => c.amount > 0.5);
-    const toPay = all
-      .map((c) => ({ name: c.name, amount: c.purchases - c.paid }))
-      .filter((c) => c.amount > 0.5);
+    // One net balance per company, so a company that is both customer and
+    // supplier appears once:
+    //   net = (sales - received) - (purchases - paid)
+    //   net > 0  -> they still have to pay you   (Payments due)
+    //   net < 0  -> you still have to pay them   (Payments to pay)
+    const withNet = all.map((c) => ({
+      name: c.name,
+      net: c.sales - c.received - (c.purchases - c.paid),
+    }));
+
+    const toReceive = withNet
+      .filter((c) => c.net > 0.5)
+      .map((c) => ({ name: c.name, amount: c.net }));
+    const toPay = withNet
+      .filter((c) => c.net < -0.5)
+      .map((c) => ({ name: c.name, amount: -c.net }));
 
     const sum = (list) => list.reduce((t, c) => t + c.amount, 0);
 
@@ -1498,12 +1508,12 @@ export default function App() {
       toPay: sortRows(toPay, (c) => c[paySort.key], paySort),
       totalReceive: sum(toReceive),
       totalPay: sum(toPay),
-      // one row per company for export
-      exportRows: all
+      // export: one row per company, the two remaining balances in separate columns
+      exportRows: withNet
         .map((c) => [
           c.name,
-          c.sales - c.received > 0.5 ? c.sales - c.received : null,
-          c.purchases - c.paid > 0.5 ? c.purchases - c.paid : null,
+          c.net > 0.5 ? c.net : null,
+          c.net < -0.5 ? -c.net : null,
         ])
         .filter((r) => r[1] !== null || r[2] !== null)
         .sort((a, b) =>
@@ -1616,12 +1626,16 @@ export default function App() {
       };
     }
 
-    // ---- Payment dues
+    // ---- Payment dues: remaining balances in separate columns
     if (page === DUES) {
       return {
         title: "Payment Dues",
         filterText: search ? `Search: ${search}` : "",
-        headers: ["Company", "Payments due (to receive)", "Payments to pay"],
+        headers: [
+          "Company",
+          "Payments due - remaining balance (to receive)",
+          "Payments to pay - remaining balance",
+        ],
         kinds: [null, "money", "money"],
         rows: duesView.exportRows,
         totalsRow: [
@@ -3243,7 +3257,7 @@ export default function App() {
               )}
             </div>
           ) : page === DUES ? (
-            /* PAYMENT DUES — simple company + amount lists */
+            /* PAYMENT DUES — company + remaining balance only */
 
             <div className="dues-page">
               <div className="dues-head">
@@ -3260,8 +3274,8 @@ export default function App() {
                       <div>
                         <h3>Payments due</h3>
                         <p className="muted">
-                          Customers who still have to pay you ·{" "}
-                          {duesView.toReceive.length}{" "}
+                          Companies that owe you · (sales − received) −
+                          (purchases − paid) · {duesView.toReceive.length}{" "}
                           {duesView.toReceive.length === 1
                             ? "company"
                             : "companies"}
@@ -3280,7 +3294,7 @@ export default function App() {
                               onSort={sortDue}
                             />
                             <SortTh
-                              label="Amount"
+                              label="Remaining balance"
                               k="amount"
                               kind="num"
                               right
@@ -3308,7 +3322,7 @@ export default function App() {
                       <div className="totals-label">Total</div>
                       <div className="totals-items">
                         <div>
-                          <span>To receive</span>
+                          <span>Total to receive</span>
                           <b>{money(duesView.totalReceive)}</b>
                         </div>
                       </div>
@@ -3320,8 +3334,8 @@ export default function App() {
                       <div>
                         <h3>Payments to pay</h3>
                         <p className="muted">
-                          Suppliers you still have to pay ·{" "}
-                          {duesView.toPay.length}{" "}
+                          Companies you owe · (purchases − paid) − (sales −
+                          received) · {duesView.toPay.length}{" "}
                           {duesView.toPay.length === 1
                             ? "company"
                             : "companies"}
@@ -3340,7 +3354,7 @@ export default function App() {
                               onSort={sortPay}
                             />
                             <SortTh
-                              label="Amount"
+                              label="Remaining balance"
                               k="amount"
                               kind="num"
                               right
@@ -3368,7 +3382,7 @@ export default function App() {
                       <div className="totals-label">Total</div>
                       <div className="totals-items">
                         <div>
-                          <span>To pay</span>
+                          <span>Total to pay</span>
                           <b>{money(duesView.totalPay)}</b>
                         </div>
                       </div>
