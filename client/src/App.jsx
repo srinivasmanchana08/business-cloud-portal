@@ -44,6 +44,7 @@ import {
 } from "lucide-react";
 
 import { exportExcel, exportPdf } from "./exportUtils";
+import Dashboard from "./Dashboard";
 
 // =====================================================
 // 1. ENVIRONMENT CONFIGURATION
@@ -79,6 +80,7 @@ const auth = createClient(SUPABASE_URL, SUPABASE_KEY);
 const PAGE_LABEL = {
   Orders: "Purchase Orders",
   Dues: "Payment Dues",
+  Unloads: "Unload Status",
 };
 
 // Pages shown directly in the sidebar
@@ -148,7 +150,7 @@ function readView() {
       return { page: v.page, biz: "" };
 
     const folder = folders.find((f) => f.name === v.biz);
-    const tabPages = ["Ledger", "Dues", "Vehicle Tracking"]; // opened from the tab strip
+    const tabPages = ["Ledger", "Dues", "Unloads", "Vehicle Tracking"]; // opened from the tab strip
     if (
       folder &&
       (folder.items.some(([n]) => n === v.page) || tabPages.includes(v.page))
@@ -209,6 +211,7 @@ const LEDGER = "Ledger";
 const TRACK = "Vehicle Tracking";
 const RENT = "Vehicle Rent";
 const DUES = "Dues";
+const UNLOAD = "Unloads";
 
 // singular names used on the "Add ..." button and the modal title
 const RECORD_LABEL = {
@@ -459,7 +462,13 @@ export default function App() {
 
   // the Vehicle Tracking page adds Purchase records
   const dataPage =
-    page === TRACK ? "Purchases" : page === RENT ? "Rents" : page;
+    page === TRACK
+      ? "Purchases"
+      : page === RENT
+        ? "Rents"
+        : page === UNLOAD
+          ? "Sales"
+          : page;
 
   // ---- Redux (cached data, filters, sort)
   const dispatch = useDispatch();
@@ -567,10 +576,10 @@ export default function App() {
   const [editing, setEditing] = useState(null);
   const [mobile, setMobile] = useState(false);
 
-  // desktop: the whole sidebar can be closed and opened again
-  const [sidebarClosed, setSidebarClosed] = useState(() => {
+  // desktop: the sidebar is a slim icon rail; the Menu button widens it
+  const [wide, setWide] = useState(() => {
     try {
-      return localStorage.getItem("ms-sidebar") === "closed";
+      return localStorage.getItem("ms-sidebar-wide") === "yes";
     } catch {
       return false;
     }
@@ -578,17 +587,25 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem("ms-sidebar", sidebarClosed ? "closed" : "open");
+      localStorage.setItem("ms-sidebar-wide", wide ? "yes" : "no");
     } catch {
       /* ignore */
     }
-  }, [sidebarClosed]);
+  }, [wide]);
 
   // sidebar folders: open/closed
-  const [openFolders, setOpenFolders] = useState(() => ({
-    DDGS: true,
-    [readView().biz || "DDGS"]: true,
-  }));
+  const [openFolders, setOpenFolders] = useState({});
+  const [flyTop, setFlyTop] = useState(80); // where the folder pop-out opens
+
+  // rail mode: a pop-out folder closes when you click anywhere else
+  useEffect(() => {
+    if (wide) return undefined;
+    const close = (e) => {
+      if (!e.target.closest?.(".sidebar")) setOpenFolders({});
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [wide]);
 
   // which business the current page belongs to ("" = Dashboard / Companies)
   const [biz, setBiz] = useState(() => readView().biz);
@@ -642,10 +659,19 @@ export default function App() {
   const sortL = (k, d) => setLSort((c) => nextSort(c, k, d));
 
   // Payment Dues page: two simple lists
-  const [dueSort, setDueSort] = useState({ key: "name", dir: "asc" });
-  const [paySort, setPaySort] = useState({ key: "name", dir: "asc" });
+  const [dueSort, setDueSort] = useState({ key: "amount", dir: "desc" });
+  const [paySort, setPaySort] = useState({ key: "amount", dir: "desc" });
   const sortDue = (k, d) => setDueSort((c) => nextSort(c, k, d));
   const sortPay = (k, d) => setPaySort((c) => nextSort(c, k, d));
+
+  // Unload Status page
+  const [uCompany, setUCompany] = useState("");
+  const [uStatus, setUStatus] = useState("");
+  const [uFrom, setUFrom] = useState("");
+  const [uTo, setUTo] = useState("");
+  const [uSort, setUSort] = useState({ key: "entry_date", dir: "desc" });
+  const sortU = (k, d) => setUSort((c) => nextSort(c, k, d));
+  const [unloadEdit, setUnloadEdit] = useState(null);
   const [dataSorts, setDataSorts] = useState({});
   const dataSort = dataSorts[page] || DEFAULT_SORT[page] || NO_SORT;
 
@@ -822,7 +848,12 @@ export default function App() {
         allowedLists(["Rents", "Purchases"]).forEach((p) =>
           dispatch(fetchList({ api, page: p, force, business: biz })),
         );
-      } else if (page === SUMMARY || page === LEDGER || page === DUES) {
+      } else if (
+        page === SUMMARY ||
+        page === LEDGER ||
+        page === DUES ||
+        page === UNLOAD
+      ) {
         allowedLists(["Purchases", "Sales", "Payments"]).forEach((p) =>
           dispatch(fetchList({ api, page: p, force, business: biz })),
         );
@@ -1581,6 +1612,95 @@ export default function App() {
   ]);
 
   // ===================================================
+  // 10c-5. UNLOAD STATUS (every sale: waiting / unloaded / short)
+  // ===================================================
+
+  const unloadView = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const now = today();
+
+    const all = salesList.items.map((r) => {
+      const sold = Number(r.quantity || 0);
+      const got = Number(r.unload_quantity || 0);
+      const status =
+        got <= 0 ? "Pending" : got < sold - 0.0005 ? "Short" : "Unloaded";
+
+      return {
+        ...r,
+        status,
+        shortage: status === "Pending" ? null : Math.max(sold - got, 0),
+        waiting:
+          status === "Pending"
+            ? Math.max(0, daysBetween(dayOf(r.entry_date), now))
+            : null,
+      };
+    });
+
+    const get = {
+      entry_date: (r) => dayOf(r.entry_date),
+      company: (r) => companyMap[r.company_id],
+      vehicle_number: (r) => r.vehicle_number,
+      voucher_no: (r) => r.voucher_no,
+      quantity: (r) => Number(r.quantity || 0),
+      unload_date: (r) => (r.unload_date ? dayOf(r.unload_date) : null),
+      unload_quantity: (r) =>
+        r.status === "Pending" ? null : Number(r.unload_quantity || 0),
+      shortage: (r) => r.shortage,
+      waiting: (r) => r.waiting,
+      status: (r) => r.status,
+    };
+
+    const filteredRows = all.filter((r) => {
+      const day = dayOf(r.entry_date);
+
+      if (uCompany && r.company_id !== uCompany) return false;
+      if (uStatus && r.status !== uStatus) return false;
+      if (uFrom && day < uFrom) return false;
+      if (uTo && day > uTo) return false;
+
+      if (q) {
+        const text = [r.vehicle_number, r.voucher_no, companyMap[r.company_id]]
+          .join(" ")
+          .toLowerCase();
+        if (!text.includes(q)) return false;
+      }
+
+      return true;
+    });
+
+    const rows = sortRows(filteredRows, get[uSort.key], uSort, byCreated);
+
+    const totals = {
+      saleQty: 0,
+      unloadQty: 0,
+      shortage: 0,
+      pending: 0,
+      pendingQty: 0,
+      short: 0,
+      unloaded: 0,
+    };
+
+    filteredRows.forEach((r) => {
+      totals.saleQty += Number(r.quantity || 0);
+
+      if (r.status === "Pending") {
+        totals.pending += 1;
+        totals.pendingQty += Number(r.quantity || 0);
+        return;
+      }
+
+      totals.unloadQty += Number(r.unload_quantity || 0);
+      totals.shortage += r.shortage || 0;
+      if (r.status === "Short") totals.short += 1;
+      else totals.unloaded += 1;
+    });
+
+    return { rows, totals, all: all.length };
+  }, [salesList, companyMap, uCompany, uStatus, uFrom, uTo, uSort, search]);
+
+  const unloadFiltered = Boolean(uCompany || uStatus || uFrom || uTo || search);
+
+  // ===================================================
   // 10d. EXPORT (Excel / PDF) — exports exactly what is on screen
   // ===================================================
 
@@ -1689,6 +1809,60 @@ export default function App() {
         kinds: [null, "money"],
         rows: list.map((c) => [c.name, c.amount]),
         totalsRow: [`Total (${list.length} companies)`, total],
+      };
+    }
+
+    // ---- Unload status
+    if (page === UNLOAD) {
+      const parts = [];
+      if (uCompany) parts.push(`Customer: ${name(uCompany)}`);
+      if (uStatus) parts.push(`Status: ${uStatus}`);
+      if (uFrom) parts.push(`From ${uFrom}`);
+      if (uTo) parts.push(`To ${uTo}`);
+      if (search) parts.push(`Search: ${search}`);
+
+      const t = unloadView.totals;
+
+      return {
+        title: "Unload Status",
+        filterText: parts.join(", "),
+        headers: [
+          "Sale date",
+          "Customer",
+          "Vehicle",
+          "Voucher no.",
+          "Sale qty (qtl)",
+          "Unload date",
+          "Unload qty (qtl)",
+          "Shortage (qtl)",
+          "Waiting (days)",
+          "Status",
+        ],
+        kinds: [null, null, null, null, "qty", null, "qty", "qty", "int", null],
+        rows: unloadView.rows.map((r) => [
+          day(r.entry_date),
+          name(r.company_id),
+          r.vehicle_number || "",
+          r.voucher_no || "",
+          Number(r.quantity || 0),
+          day(r.unload_date),
+          r.status === "Pending" ? null : Number(r.unload_quantity || 0),
+          r.shortage,
+          r.waiting,
+          r.status,
+        ]),
+        totalsRow: [
+          `Total (${unloadView.rows.length} records)`,
+          "",
+          "",
+          "",
+          t.saleQty,
+          "",
+          t.unloadQty,
+          t.shortage,
+          null,
+          `${t.pending} pending`,
+        ],
       };
     }
 
@@ -1951,13 +2125,15 @@ export default function App() {
       const companyId =
         page === TRACK
           ? tPCompany || tSCompany
-          : page === LEDGER
-            ? lCompany
-            : page === RENT
-              ? rCompany
-              : page === SUMMARY
-                ? sCompany
-                : filters?.company;
+          : page === UNLOAD
+            ? uCompany
+            : page === LEDGER
+              ? lCompany
+              : page === RENT
+                ? rCompany
+                : page === SUMMARY
+                  ? sCompany
+                  : filters?.company;
       spec.company = companyMap[companyId] || "";
 
       if (page === TRACK && !isOwner) {
@@ -2043,7 +2219,7 @@ export default function App() {
     if (window.matchMedia("(max-width: 900px)").matches) {
       setMobile((open) => !open);
     } else {
-      setSidebarClosed((closed) => !closed);
+      setWide((w) => !w);
     }
   }
 
@@ -2107,8 +2283,6 @@ export default function App() {
       ["quantity", "Quantity (qtl)", "number"],
       ["rate", "Rate", "number"],
       ["gross_total", "Gross total (₹)", "number"],
-      ["unload_date", "Unload date", "date"],
-      ["unload_quantity", "Unload quantity (qtl)", "number"],
       ["payment_due_date", "Payment due date", "date"],
       ["notes", "Notes", "text"],
     ],
@@ -2314,12 +2488,6 @@ export default function App() {
         body.order_total = Number(body.quantity || 0) * Number(body.rate || 0);
       }
 
-      // a sale that has not been unloaded has no unload date or payment due date
-      if (dataPage === "Sales" && Number(body.unload_quantity || 0) === 0) {
-        body.unload_date = null;
-        body.payment_due_date = null;
-      }
-
       await dispatch(
         saveRecord({
           api,
@@ -2342,6 +2510,39 @@ export default function App() {
   // ===================================================
   // 17. DELETE RECORD
   // ===================================================
+
+  async function saveUnload(event) {
+    event.preventDefault();
+    if (!unloadEdit) return;
+
+    setError("");
+    setBusy(true);
+
+    try {
+      const form = new FormData(event.currentTarget);
+      const raw = form.get("unload_quantity");
+      const quantity = raw === "" || raw == null ? 0 : Number(raw);
+
+      await dispatch(
+        saveRecord({
+          api,
+          page: "Sales",
+          id: unloadEdit.id,
+          body: {
+            unload_quantity: quantity,
+            unload_date: quantity > 0 ? form.get("unload_date") || null : null,
+          },
+          business: biz,
+        }),
+      ).unwrap();
+
+      setUnloadEdit(null);
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function remove(id) {
     if (!window.confirm("Are you sure you want to delete this record?")) {
@@ -2470,7 +2671,7 @@ export default function App() {
   // ===================================================
 
   return (
-    <div className={`app-shell ${sidebarClosed ? "sidebar-closed" : ""}`}>
+    <div className={`app-shell ${wide ? "sidebar-wide" : ""}`}>
       {/* SIDEBAR */}
 
       <aside className={`sidebar ${mobile ? "open" : ""}`}>
@@ -2488,6 +2689,7 @@ export default function App() {
         {(() => {
           const goTo = (name, business = "") => {
             // switch the cached data first so the old business never flashes
+            setOpenFolders({});
             dispatch(setBusiness(business));
             setBiz(business);
             setPage(name);
@@ -2505,14 +2707,16 @@ export default function App() {
                     key={name}
                     className={`nav-item ${!biz && page === name ? "active" : ""}`}
                     onClick={() => goTo(name)}
+                    title={PAGE_LABEL[name] || name}
                   >
-                    <Icon size={18} />
-                    {PAGE_LABEL[name] || name}
+                    <Icon size={20} />
+                    <span className="nav-text">{PAGE_LABEL[name] || name}</span>
                   </button>
                 ))}
 
               {folders.map((folder) => {
-                const open = Boolean(openFolders[folder.name]);
+                const open =
+                  openFolders[folder.name] ?? (wide && biz === folder.name);
                 const items = folder.items.filter(
                   ([n]) => isOwner || !OWNER_ONLY_PAGES.includes(n),
                 );
@@ -2525,11 +2729,23 @@ export default function App() {
                       type="button"
                       className={`nav-item nav-folder-btn ${holdsPage ? "has-active" : ""}`}
                       aria-expanded={open}
-                      onClick={() =>
-                        setOpenFolders((f) => ({ ...f, [folder.name]: !open }))
-                      }
+                      title={folder.name}
+                      onClick={(e) => {
+                        const top = e.currentTarget.getBoundingClientRect().top;
+                        setFlyTop(
+                          Math.max(
+                            8,
+                            Math.min(top - 6, window.innerHeight - 340),
+                          ),
+                        );
+                        setOpenFolders((f) =>
+                          wide
+                            ? { ...f, [folder.name]: !open }
+                            : { [folder.name]: !open },
+                        );
+                      }}
                     >
-                      <FolderIcon size={18} />
+                      <FolderIcon size={20} />
                       <span className="nav-folder-name">{folder.name}</span>
                       <ChevronDown
                         size={15}
@@ -2538,7 +2754,7 @@ export default function App() {
                     </button>
 
                     {open && (
-                      <div className="nav-sub">
+                      <div className="nav-sub" style={{ top: flyTop }}>
                         {items.length ? (
                           items.map(([name, Icon]) => (
                             <button
@@ -2551,7 +2767,9 @@ export default function App() {
                               onClick={() => goTo(name, folder.name)}
                             >
                               <Icon size={17} />
-                              {PAGE_LABEL[name] || name}
+                              <span className="nav-text">
+                                {PAGE_LABEL[name] || name}
+                              </span>
                             </button>
                           ))
                         ) : (
@@ -2580,9 +2798,9 @@ export default function App() {
             <Menu />
           </button>
 
-          <div>
-            <span className="muted">{biz ? `${biz} / ` : "Workspace / "}</span>
+          <div className="topbar-title">
             <b>{PAGE_LABEL[page] || page}</b>
+            {biz && <span className="muted">{biz}</span>}
           </div>
 
           {page !== "Dashboard" && (
@@ -2611,7 +2829,9 @@ export default function App() {
             {!isViewer &&
               page !== "Dashboard" &&
               page !== SUMMARY &&
-              page !== LEDGER && (
+              page !== LEDGER &&
+              page !== UNLOAD &&
+              page !== DUES && (
                 <button
                   className="primary"
                   onClick={() => {
@@ -2625,8 +2845,8 @@ export default function App() {
                 </button>
               )}
 
-            <span className="top-email" title={session.user.email}>
-              {session.user.email}
+            <span className="top-avatar" title={session.user.email}>
+              {(session.user.email || "?").charAt(0).toUpperCase()}
             </span>
 
             <button
@@ -2656,8 +2876,8 @@ export default function App() {
             type="button"
             className="subtab subtab-menu"
             onClick={toggleMenu}
-            aria-expanded={!sidebarClosed}
-            title={sidebarClosed ? "Open the sidebar" : "Close the sidebar"}
+            aria-expanded={wide}
+            title={wide ? "Show icons only" : "Show menu names"}
           >
             <Menu size={18} />
             <span>Menu</span>
@@ -2665,8 +2885,10 @@ export default function App() {
 
           <span className="subtabs-sep" aria-hidden="true" />
 
-          {[LEDGER, DUES, TRACK]
-            .filter((name) => canSeeFinance || name === TRACK)
+          {[LEDGER, DUES, UNLOAD, TRACK]
+            .filter(
+              (name) => canSeeFinance || name === TRACK || name === UNLOAD,
+            )
             .map((name) => {
               const folder = biz || folders[0].name;
               const active = page === name && biz === folder;
@@ -2701,52 +2923,14 @@ export default function App() {
           {/* DASHBOARD */}
 
           {page === "Dashboard" ? (
-            <>
-              <div className="stat-grid">
-                {[
-                  ["Total sales", stats?.sales, "blue"],
-                  ["Total purchases", stats?.purchases, "violet"],
-                  ["Payments received", stats?.collected, "green"],
-                  ["Payments paid", stats?.disbursed, "amber"],
-                  ["Receivable balance", stats?.receivable, "green"],
-                  ["Payable balance", stats?.payable, "red"],
-                ]
-                  .filter(
-                    ([title]) =>
-                      canSeeFinance ||
-                      ["Total sales", "Total purchases"].includes(title),
-                  )
-                  .map(([title, value, color]) => (
-                    <div className="stat-card" key={title}>
-                      <span>{title}</span>
-
-                      <strong>{money(value)}</strong>
-
-                      <small>All recorded transactions</small>
-
-                      <div className={`stat-icon ${color}`}>
-                        <Wallet size={18} />
-                      </div>
-                    </div>
-                  ))}
-              </div>
-
-              {canSeeFinance && (
-                <div className="panel">
-                  <div className="panel-head">
-                    <div>
-                      <h3>Net cash position</h3>
-
-                      <p className="muted">
-                        Payments received minus payments paid
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="net-value">{money(stats?.net)}</div>
-                </div>
-              )}
-            </>
+            <Dashboard
+              api={api}
+              canSeeFinance={canSeeFinance}
+              companyMap={companyMap}
+              onOpen={(name, business) =>
+                goToPage(name, business || folders[0].name)
+              }
+            />
           ) : page === TRACK ? (
             /* VEHICLE TRACKING */
 
@@ -3492,6 +3676,273 @@ export default function App() {
                           <b>{money(duesView.totalPay)}</b>
                         </div>
                       </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : page === UNLOAD ? (
+            /* UNLOAD STATUS — separate from the Sales form */
+
+            <div className="panel fill">
+              <div className="table-toolbar">
+                <div>
+                  <h3>Unload status</h3>
+
+                  <p className="muted">
+                    {unloadView.rows.length} of {unloadView.all} sales
+                    {summaryLoading && !summaryFirstLoad && " · refreshing…"}
+                  </p>
+                </div>
+
+                <div className="filter-bar">
+                  <label>
+                    Customer
+                    <select
+                      value={uCompany}
+                      onChange={(e) => setUCompany(e.target.value)}
+                    >
+                      <option value="">All customers</option>
+                      {customers.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    Status
+                    <select
+                      value={uStatus}
+                      onChange={(e) => setUStatus(e.target.value)}
+                    >
+                      <option value="">All</option>
+                      <option value="Pending">Pending (not unloaded)</option>
+                      <option value="Short">Short (less than sold)</option>
+                      <option value="Unloaded">Unloaded</option>
+                    </select>
+                  </label>
+
+                  <label>
+                    From
+                    <input
+                      type="date"
+                      value={uFrom}
+                      max={uTo || undefined}
+                      onChange={(e) => setUFrom(e.target.value)}
+                    />
+                  </label>
+
+                  <label>
+                    To
+                    <input
+                      type="date"
+                      value={uTo}
+                      min={uFrom || undefined}
+                      onChange={(e) => setUTo(e.target.value)}
+                    />
+                  </label>
+
+                  {unloadFiltered && (
+                    <button
+                      type="button"
+                      className="secondary clear-filters"
+                      onClick={() => {
+                        setUCompany("");
+                        setUStatus("");
+                        setUFrom("");
+                        setUTo("");
+                        setSearch("");
+                      }}
+                    >
+                      <X size={14} />
+                      Clear filters
+                    </button>
+                  )}
+                </div>
+
+                {exportButtons}
+              </div>
+
+              {summaryFirstLoad ? (
+                <p className="muted pad">Loading records...</p>
+              ) : (
+                <div className="table-wrap">
+                  <table className="summary-table">
+                    <thead>
+                      <tr>
+                        <SortTh
+                          label="Sale date"
+                          k="entry_date"
+                          kind="date"
+                          sort={uSort}
+                          onSort={sortU}
+                        />
+                        <SortTh
+                          label="Customer"
+                          k="company"
+                          sort={uSort}
+                          onSort={sortU}
+                        />
+                        <SortTh
+                          label="Vehicle"
+                          k="vehicle_number"
+                          sort={uSort}
+                          onSort={sortU}
+                        />
+                        <SortTh
+                          label="Voucher no."
+                          k="voucher_no"
+                          sort={uSort}
+                          onSort={sortU}
+                        />
+                        <SortTh
+                          label="Sale qty (qtl)"
+                          k="quantity"
+                          kind="num"
+                          right
+                          sort={uSort}
+                          onSort={sortU}
+                        />
+                        <SortTh
+                          label="Unload date"
+                          k="unload_date"
+                          kind="date"
+                          sort={uSort}
+                          onSort={sortU}
+                        />
+                        <SortTh
+                          label="Unload qty (qtl)"
+                          k="unload_quantity"
+                          kind="num"
+                          right
+                          sort={uSort}
+                          onSort={sortU}
+                        />
+                        <SortTh
+                          label="Shortage (qtl)"
+                          k="shortage"
+                          kind="num"
+                          right
+                          sort={uSort}
+                          onSort={sortU}
+                          title="Sale quantity - unload quantity"
+                        />
+                        <SortTh
+                          label="Waiting"
+                          k="waiting"
+                          kind="num"
+                          right
+                          sort={uSort}
+                          onSort={sortU}
+                          title="Days since the sale while the vehicle is not unloaded"
+                        />
+                        <SortTh
+                          label="Status"
+                          k="status"
+                          sort={uSort}
+                          onSort={sortU}
+                        />
+                        {!isViewer && <th>Actions</th>}
+                      </tr>
+                    </thead>
+
+                    <tbody>
+                      {unloadView.rows.map((r) => (
+                        <tr key={r.id}>
+                          <td>{dayOf(r.entry_date) || "—"}</td>
+                          <td>{companyMap[r.company_id] || "—"}</td>
+                          <td>
+                            <b>{r.vehicle_number || "—"}</b>
+                          </td>
+                          <td>{r.voucher_no || "—"}</td>
+                          <td className="num">{qty(r.quantity)}</td>
+                          <td>{r.unload_date ? dayOf(r.unload_date) : "—"}</td>
+                          <td className="num">
+                            {r.status === "Pending"
+                              ? "—"
+                              : qty(r.unload_quantity)}
+                          </td>
+                          <td
+                            className={`num ${r.shortage > 0 ? "due-out" : ""}`}
+                          >
+                            {r.shortage == null ? "—" : qty(r.shortage)}
+                          </td>
+                          <td className="num">
+                            {r.waiting == null
+                              ? "—"
+                              : `${r.waiting} ${r.waiting === 1 ? "day" : "days"}`}
+                          </td>
+                          <td>
+                            <span
+                              className={`status-pill ${
+                                r.status === "Unloaded"
+                                  ? "sold"
+                                  : r.status === "Pending"
+                                    ? "pending"
+                                    : "orphan"
+                              }`}
+                            >
+                              {r.status}
+                            </span>
+                          </td>
+                          {!isViewer && (
+                            <td>
+                              <div className="row-actions">
+                                <button
+                                  onClick={() => {
+                                    setError("");
+                                    setUnloadEdit(r);
+                                  }}
+                                  title="Update unload"
+                                >
+                                  <Edit3 size={16} />
+                                </button>
+                              </div>
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+
+                  {!unloadView.rows.length && (
+                    <p className="muted pad">
+                      {unloadView.all && unloadFiltered
+                        ? "No records match these filters."
+                        : "No sales yet."}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {!summaryFirstLoad && (
+                <div className="totals-bar one-line">
+                  <div className="totals-label">
+                    {unloadFiltered ? "Filtered totals" : "Totals"}
+                  </div>
+
+                  <div className="totals-items">
+                    <div>
+                      <span>Sale qty (qtl)</span>
+                      <b>{qty(unloadView.totals.saleQty)}</b>
+                    </div>
+                    <div>
+                      <span>Unloaded qty (qtl)</span>
+                      <b>{qty(unloadView.totals.unloadQty)}</b>
+                    </div>
+                    <div>
+                      <span>Shortage (qtl)</span>
+                      <b>{qty(unloadView.totals.shortage)}</b>
+                    </div>
+                    <div>
+                      <span>Pending vehicles</span>
+                      <b>{unloadView.totals.pending}</b>
+                    </div>
+                    <div>
+                      <span>Pending qty (qtl)</span>
+                      <b>{qty(unloadView.totals.pendingQty)}</b>
                     </div>
                   </div>
                 </div>
@@ -4290,6 +4741,74 @@ export default function App() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {unloadEdit && !isViewer && (
+        <div className="modal-backdrop" onClick={() => setUnloadEdit(null)}>
+          <form
+            key={unloadEdit.id}
+            className="modal"
+            onSubmit={saveUnload}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head">
+              <div>
+                <p className="eyebrow">UNLOAD STATUS</p>
+                <h2>Update unload</h2>
+                <p className="muted">
+                  {unloadEdit.vehicle_number || "—"} ·{" "}
+                  {companyMap[unloadEdit.company_id] || "—"} · sold{" "}
+                  {qty(unloadEdit.quantity)} qtl
+                </p>
+              </div>
+
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => setUnloadEdit(null)}
+                aria-label="Close"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="form-grid">
+              <label>
+                Unload date
+                <input
+                  name="unload_date"
+                  type="date"
+                  defaultValue={dayOf(unloadEdit.unload_date) || today()}
+                />
+              </label>
+
+              <label>
+                Unload quantity (qtl) - leave 0 if not unloaded yet
+                <input
+                  name="unload_quantity"
+                  type="number"
+                  step="any"
+                  min="0"
+                  defaultValue={Number(unloadEdit.unload_quantity || 0)}
+                />
+              </label>
+            </div>
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setUnloadEdit(null)}
+              >
+                Cancel
+              </button>
+
+              <button className="primary" disabled={busy}>
+                {busy ? "Saving..." : "Save unload"}
+              </button>
+            </div>
+          </form>
         </div>
       )}
 
