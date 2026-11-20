@@ -220,8 +220,9 @@ const dataSlice = createSlice({
     },
 
     // Called on sign-out so the next user never sees cached data.
-    clearData() {
-      return makeInitialState();
+    clearData(state) {
+      // keep the selected business so a page refresh stays on the same folder
+      return { ...makeInitialState(), business: state.business };
     },
   },
 

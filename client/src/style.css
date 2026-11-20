@@ -1031,3 +1031,136 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* ---------- accounts tab strip (menu + Ledger, Payment Dues, Vehicle Tracking) ---------- */
+
+.subtabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 42px;
+  padding: 0 14px;
+  background: #172338;
+  color: #e6ecf7;
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+
+.subtabs::-webkit-scrollbar {
+  display: none;
+}
+
+.subtab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #e6ecf7;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.subtab:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.subtab.active {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  box-shadow: inset 0 -2px 0 #6689ff;
+}
+
+.subtab:focus-visible {
+  outline: 2px solid #6689ff;
+  outline-offset: 1px;
+}
+
+.subtab-menu {
+  font-weight: 700;
+  color: #fff;
+}
+
+.subtabs-sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 8px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* ---------- sidebar close / open ---------- */
+
+.app-shell .sidebar {
+  transition: transform 0.2s ease, visibility 0s;
+}
+
+.app-shell .main {
+  transition: margin-left 0.2s ease;
+}
+
+.app-shell.sidebar-closed .sidebar {
+  transform: translateX(-100%);
+  visibility: hidden;
+  transition: transform 0.2s ease, visibility 0s 0.2s;
+}
+
+.app-shell.sidebar-closed .main {
+  margin-left: 0;
+}
+
+@media (max-width: 900px) {
+  .app-shell.sidebar-closed .sidebar.open {
+    transform: translateX(0);
+    visibility: visible;
+    transition: transform 0.2s ease, visibility 0s;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+  .app-shell .sidebar,
+  .app-shell .main {
+    transition: none;
+  }
+}
+
+/* the tab strip is 42px taller than before: keep the table panels inside the screen */
+
+.panel.fill {
+  height: calc(100vh - 68px - 42px - 20px);
+}
+
+@media (max-width: 900px) {
+  .panel.fill {
+    height: calc(100dvh - 68px - 42px - 20px);
+  }
+}
+
+@media (max-width: 560px) {
+  .panel.fill {
+    height: calc(100dvh - 162px);
+  }
+}
+
+.dues-panel .table-wrap {
+  max-height: calc(100vh - 342px);
+}
+
+/* ---------- title, filters and Excel / PDF on one row ---------- */
+
+.table-toolbar>div:first-child .muted {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.table-toolbar>.filter-bar {
+  margin: 0;
+}

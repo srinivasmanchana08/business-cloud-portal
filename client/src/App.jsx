@@ -95,12 +95,8 @@ const folders = [
       ["Purchases", ShoppingCart],
       ["Sales", Receipt],
       ["Payments", Wallet],
-      ["Ledger", BookOpen],
-      ["Company Summary", Scale],
-      ["Vehicle Tracking", Truck],
       ["Vehicle Rent", Banknote],
       ["Orders", ClipboardList],
-      ["Dues", ListChecks],
     ],
   },
   {
@@ -109,12 +105,8 @@ const folders = [
       ["Purchases", ShoppingCart],
       ["Sales", Receipt],
       ["Payments", Wallet],
-      ["Ledger", BookOpen],
-      ["Company Summary", Scale],
-      ["Vehicle Tracking", Truck],
       ["Vehicle Rent", Banknote],
       ["Orders", ClipboardList],
-      ["Dues", ListChecks],
     ],
   },
 ];
@@ -146,6 +138,29 @@ const VIEWER_HIDDEN_PAGES = ["Companies"];
 
 // Sidebar is always listed A to Z (pages inside each folder too)
 const byName = (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" });
+// ---- remember the open page, so a browser refresh does not jump to Dashboard
+const VIEW_KEY = "ms-view";
+
+function readView() {
+  try {
+    const v = JSON.parse(localStorage.getItem(VIEW_KEY) || "{}");
+    if (!v.biz && nav.some(([n]) => n === v.page))
+      return { page: v.page, biz: "" };
+
+    const folder = folders.find((f) => f.name === v.biz);
+    const tabPages = ["Ledger", "Dues", "Vehicle Tracking"]; // opened from the tab strip
+    if (
+      folder &&
+      (folder.items.some(([n]) => n === v.page) || tabPages.includes(v.page))
+    ) {
+      return { page: v.page, biz: v.biz };
+    }
+  } catch {
+    /* storage unavailable: start on the dashboard */
+  }
+  return { page: "Dashboard", biz: "" };
+}
+
 const labelOf = (id) => PAGE_LABEL[id] || id;
 nav.sort(([a], [b]) => byName(labelOf(a), labelOf(b)));
 folders.sort((a, b) => byName(a.name, b.name));
@@ -440,7 +455,7 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
 
-  const [page, setPage] = useState("Dashboard");
+  const [page, setPage] = useState(() => readView().page);
 
   // the Vehicle Tracking page adds Purchase records
   const dataPage =
@@ -552,11 +567,45 @@ export default function App() {
   const [editing, setEditing] = useState(null);
   const [mobile, setMobile] = useState(false);
 
+  // desktop: the whole sidebar can be closed and opened again
+  const [sidebarClosed, setSidebarClosed] = useState(() => {
+    try {
+      return localStorage.getItem("ms-sidebar") === "closed";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("ms-sidebar", sidebarClosed ? "closed" : "open");
+    } catch {
+      /* ignore */
+    }
+  }, [sidebarClosed]);
+
   // sidebar folders: open/closed
-  const [openFolders, setOpenFolders] = useState({ DDGS: true });
+  const [openFolders, setOpenFolders] = useState(() => ({
+    DDGS: true,
+    [readView().biz || "DDGS"]: true,
+  }));
 
   // which business the current page belongs to ("" = Dashboard / Companies)
-  const [biz, setBiz] = useState("");
+  const [biz, setBiz] = useState(() => readView().biz);
+
+  // the data store must start on the same business as the restored page
+  useEffect(() => {
+    dispatch(setBusiness(biz));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(VIEW_KEY, JSON.stringify({ page, biz }));
+    } catch {
+      /* ignore */
+    }
+  }, [page, biz]);
 
   // Company Summary filters
   const [sCompany, setSCompany] = useState("");
@@ -565,6 +614,7 @@ export default function App() {
 
   // Vehicle Tracking filters
   const [exporting, setExporting] = useState(false);
+  const [dueExport, setDueExport] = useState(null); // "excel" | "pdf" while choosing a list
   const [tPCompany, setTPCompany] = useState("");
   const [tSCompany, setTSCompany] = useState("");
   const [tFrom, setTFrom] = useState("");
@@ -1534,7 +1584,7 @@ export default function App() {
   // 10d. EXPORT (Excel / PDF) — exports exactly what is on screen
   // ===================================================
 
-  function buildExport() {
+  function buildExport(which) {
     const day = (v) => (v ? dayOf(v) : "");
     const name = (id) => companyMap[id] || "";
     const sumOf = (list, fn) =>
@@ -1626,23 +1676,19 @@ export default function App() {
       };
     }
 
-    // ---- Payment dues: remaining balances in separate columns
+    // ---- Payment dues: one list at a time (chosen in the export window)
     if (page === DUES) {
+      const isDue = which !== "pay";
+      const list = isDue ? duesView.toReceive : duesView.toPay;
+      const total = isDue ? duesView.totalReceive : duesView.totalPay;
+
       return {
-        title: "Payment Dues",
+        title: isDue ? "Payments Due" : "Payments To Pay",
         filterText: search ? `Search: ${search}` : "",
-        headers: [
-          "Company",
-          "Payments due - remaining balance (to receive)",
-          "Payments to pay - remaining balance",
-        ],
-        kinds: [null, "money", "money"],
-        rows: duesView.exportRows,
-        totalsRow: [
-          `Total (${duesView.exportRows.length} companies)`,
-          duesView.totalReceive,
-          duesView.totalPay,
-        ],
+        headers: ["Company", "Remaining balance"],
+        kinds: [null, "money"],
+        rows: list.map((c) => [c.name, c.amount]),
+        totalsRow: [`Total (${list.length} companies)`, total],
       };
     }
 
@@ -1893,12 +1939,12 @@ export default function App() {
     };
   }
 
-  async function runExport(type) {
+  async function runExport(type, which) {
     setExporting(true);
     setError("");
 
     try {
-      const spec = buildExport();
+      const spec = buildExport(which);
       if (biz) spec.title = `${spec.title} - ${biz}`;
 
       // the company picked in the page filter is used in the file name
@@ -1942,7 +1988,9 @@ export default function App() {
         type="button"
         className="secondary"
         disabled={exporting}
-        onClick={() => runExport("excel")}
+        onClick={() =>
+          page === DUES ? setDueExport("excel") : runExport("excel")
+        }
         title="Download the filtered data as Excel"
       >
         <FileSpreadsheet size={14} />
@@ -1953,7 +2001,7 @@ export default function App() {
         type="button"
         className="secondary"
         disabled={exporting}
-        onClick={() => runExport("pdf")}
+        onClick={() => (page === DUES ? setDueExport("pdf") : runExport("pdf"))}
         title="Download the filtered data as PDF"
       >
         <FileText size={14} />
@@ -1990,6 +2038,25 @@ export default function App() {
   // 12. LOGOUT
   // ===================================================
 
+  // open / close the sidebar (slides in on phones, collapses on desktop)
+  function toggleMenu() {
+    if (window.matchMedia("(max-width: 900px)").matches) {
+      setMobile((open) => !open);
+    } else {
+      setSidebarClosed((closed) => !closed);
+    }
+  }
+
+  // go to a page of a business folder (used by the tab strip)
+  function goToPage(name, business) {
+    dispatch(setBusiness(business));
+    setBiz(business);
+    setPage(name);
+    setSearch("");
+    dispatch(clearError());
+    setMobile(false);
+  }
+
   async function logout() {
     setError("");
 
@@ -1997,7 +2064,13 @@ export default function App() {
 
     if (error) {
       setError(error.message);
+      return;
     }
+
+    // the next sign-in starts on the Dashboard
+    dispatch(setBusiness(""));
+    setBiz("");
+    setPage("Dashboard");
   }
 
   // ===================================================
@@ -2397,7 +2470,7 @@ export default function App() {
   // ===================================================
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${sidebarClosed ? "sidebar-closed" : ""}`}>
       {/* SIDEBAR */}
 
       <aside className={`sidebar ${mobile ? "open" : ""}`}>
@@ -2443,8 +2516,7 @@ export default function App() {
                 const items = folder.items.filter(
                   ([n]) => isOwner || !OWNER_ONLY_PAGES.includes(n),
                 );
-                const holdsPage =
-                  biz === folder.name && items.some(([n]) => n === page);
+                const holdsPage = biz === folder.name;
                 const FolderIcon = open ? FolderOpen : Folder;
 
                 return (
@@ -2577,6 +2649,42 @@ export default function App() {
           </div>
         </header>
 
+        {/* ACCOUNTS TAB STRIP: menu + Ledger, Payment Dues, Vehicle Tracking on one line */}
+
+        <nav className="subtabs" aria-label="Accounts">
+          <button
+            type="button"
+            className="subtab subtab-menu"
+            onClick={toggleMenu}
+            aria-expanded={!sidebarClosed}
+            title={sidebarClosed ? "Open the sidebar" : "Close the sidebar"}
+          >
+            <Menu size={18} />
+            <span>Menu</span>
+          </button>
+
+          <span className="subtabs-sep" aria-hidden="true" />
+
+          {[LEDGER, DUES, TRACK]
+            .filter((name) => canSeeFinance || name === TRACK)
+            .map((name) => {
+              const folder = biz || folders[0].name;
+              const active = page === name && biz === folder;
+
+              return (
+                <button
+                  key={name}
+                  type="button"
+                  className={`subtab ${active ? "active" : ""}`}
+                  aria-current={active ? "page" : undefined}
+                  onClick={() => goToPage(name, folder)}
+                >
+                  {PAGE_LABEL[name] || name}
+                </button>
+              );
+            })}
+        </nav>
+
         {/* PAGE CONTENT */}
 
         <section className="content">
@@ -2651,95 +2759,94 @@ export default function App() {
                     {trackFiltered
                       ? `${tracking.rows.length} records (filtered)`
                       : `${tracking.rows.length} records`}
-                    {" · purchase company → sale company, matched by vehicle"}
                     {summaryLoading && !summaryFirstLoad && " · refreshing…"}
                   </p>
                 </div>
 
+                <div className="filter-bar">
+                  <label>
+                    Purchase company
+                    <select
+                      value={tPCompany}
+                      onChange={(e) => setTPCompany(e.target.value)}
+                    >
+                      <option value="">All companies</option>
+                      {suppliers.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    Sale company
+                    <select
+                      value={tSCompany}
+                      onChange={(e) => setTSCompany(e.target.value)}
+                    >
+                      <option value="">All companies</option>
+                      {customers.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    From
+                    <input
+                      type="date"
+                      value={tFrom}
+                      max={tTo || undefined}
+                      onChange={(e) => setTFrom(e.target.value)}
+                    />
+                  </label>
+
+                  <label>
+                    To
+                    <input
+                      type="date"
+                      value={tTo}
+                      min={tFrom || undefined}
+                      onChange={(e) => setTTo(e.target.value)}
+                    />
+                  </label>
+
+                  <label>
+                    Status
+                    <select
+                      value={tStatus}
+                      onChange={(e) => setTStatus(e.target.value)}
+                    >
+                      <option value="">All</option>
+                      <option value="Sold">Sold</option>
+                      <option value="Pending">Pending (not sold)</option>
+                      <option value="No purchase">Sale without purchase</option>
+                    </select>
+                  </label>
+
+                  {trackFiltered && (
+                    <button
+                      type="button"
+                      className="secondary clear-filters"
+                      onClick={() => {
+                        setTPCompany("");
+                        setTSCompany("");
+                        setTFrom("");
+                        setTTo("");
+                        setTStatus("");
+                        setSearch("");
+                      }}
+                    >
+                      <X size={14} />
+                      Clear filters
+                    </button>
+                  )}
+                </div>
+
                 {exportButtons}
-              </div>
-
-              <div className="filter-bar">
-                <label>
-                  Purchase company
-                  <select
-                    value={tPCompany}
-                    onChange={(e) => setTPCompany(e.target.value)}
-                  >
-                    <option value="">All companies</option>
-                    {suppliers.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label>
-                  Sale company
-                  <select
-                    value={tSCompany}
-                    onChange={(e) => setTSCompany(e.target.value)}
-                  >
-                    <option value="">All companies</option>
-                    {customers.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label>
-                  From
-                  <input
-                    type="date"
-                    value={tFrom}
-                    max={tTo || undefined}
-                    onChange={(e) => setTFrom(e.target.value)}
-                  />
-                </label>
-
-                <label>
-                  To
-                  <input
-                    type="date"
-                    value={tTo}
-                    min={tFrom || undefined}
-                    onChange={(e) => setTTo(e.target.value)}
-                  />
-                </label>
-
-                <label>
-                  Status
-                  <select
-                    value={tStatus}
-                    onChange={(e) => setTStatus(e.target.value)}
-                  >
-                    <option value="">All</option>
-                    <option value="Sold">Sold</option>
-                    <option value="Pending">Pending (not sold)</option>
-                    <option value="No purchase">Sale without purchase</option>
-                  </select>
-                </label>
-
-                {trackFiltered && (
-                  <button
-                    type="button"
-                    className="secondary clear-filters"
-                    onClick={() => {
-                      setTPCompany("");
-                      setTSCompany("");
-                      setTFrom("");
-                      setTTo("");
-                      setTStatus("");
-                      setSearch("");
-                    }}
-                  >
-                    <X size={14} />
-                    Clear filters
-                  </button>
-                )}
               </div>
 
               {summaryFirstLoad ? (
@@ -3002,94 +3109,93 @@ export default function App() {
                     {rentFiltered
                       ? `${rentView.rows.length} of ${rentsList.items.length} records`
                       : `${rentsList.items.length} records`}
-                    {" · rent is deducted from the margin in Vehicle Tracking"}
                     {rentsList.loading && rentsList.loaded && " · refreshing…"}
                   </p>
                 </div>
 
+                <div className="filter-bar">
+                  <label>
+                    Purchase company
+                    <select
+                      value={rCompany}
+                      onChange={(e) => setRCompany(e.target.value)}
+                    >
+                      <option value="">All companies</option>
+                      {companyOptions.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    Account name
+                    <select
+                      value={rAccount}
+                      onChange={(e) => setRAccount(e.target.value)}
+                    >
+                      <option value="">All accounts</option>
+                      {rentView.accounts.map((a) => (
+                        <option key={a} value={a}>
+                          {a}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    From
+                    <input
+                      type="date"
+                      value={rFrom}
+                      max={rTo || undefined}
+                      onChange={(e) => setRFrom(e.target.value)}
+                    />
+                  </label>
+
+                  <label>
+                    To
+                    <input
+                      type="date"
+                      value={rTo}
+                      min={rFrom || undefined}
+                      onChange={(e) => setRTo(e.target.value)}
+                    />
+                  </label>
+
+                  <label>
+                    Status
+                    <select
+                      value={rStatus}
+                      onChange={(e) => setRStatus(e.target.value)}
+                    >
+                      <option value="">All</option>
+                      <option value="Paid">Paid</option>
+                      <option value="Unpaid">Unpaid</option>
+                    </select>
+                  </label>
+
+                  {rentFiltered && (
+                    <button
+                      type="button"
+                      className="secondary clear-filters"
+                      onClick={() => {
+                        setRCompany("");
+                        setRAccount("");
+                        setRFrom("");
+                        setRTo("");
+                        setRStatus("");
+                        setSearch("");
+                      }}
+                    >
+                      <X size={14} />
+                      Clear filters
+                    </button>
+                  )}
+                </div>
+
                 {exportButtons}
-              </div>
-
-              <div className="filter-bar">
-                <label>
-                  Purchase company
-                  <select
-                    value={rCompany}
-                    onChange={(e) => setRCompany(e.target.value)}
-                  >
-                    <option value="">All companies</option>
-                    {companyOptions.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label>
-                  Account name
-                  <select
-                    value={rAccount}
-                    onChange={(e) => setRAccount(e.target.value)}
-                  >
-                    <option value="">All accounts</option>
-                    {rentView.accounts.map((a) => (
-                      <option key={a} value={a}>
-                        {a}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label>
-                  From
-                  <input
-                    type="date"
-                    value={rFrom}
-                    max={rTo || undefined}
-                    onChange={(e) => setRFrom(e.target.value)}
-                  />
-                </label>
-
-                <label>
-                  To
-                  <input
-                    type="date"
-                    value={rTo}
-                    min={rFrom || undefined}
-                    onChange={(e) => setRTo(e.target.value)}
-                  />
-                </label>
-
-                <label>
-                  Status
-                  <select
-                    value={rStatus}
-                    onChange={(e) => setRStatus(e.target.value)}
-                  >
-                    <option value="">All</option>
-                    <option value="Paid">Paid</option>
-                    <option value="Unpaid">Unpaid</option>
-                  </select>
-                </label>
-
-                {rentFiltered && (
-                  <button
-                    type="button"
-                    className="secondary clear-filters"
-                    onClick={() => {
-                      setRCompany("");
-                      setRAccount("");
-                      setRFrom("");
-                      setRTo("");
-                      setRStatus("");
-                      setSearch("");
-                    }}
-                  >
-                    <X size={14} />
-                    Clear filters
-                  </button>
-                )}
               </div>
 
               {rentsList.loading && !rentsList.loaded ? (
@@ -3400,81 +3506,80 @@ export default function App() {
                   <h3>Ledger</h3>
 
                   <p className="muted">
-                    {ledgerView.rows.length} of {ledgerView.all} entries ·
-                    purchases, sales, payments paid and received
+                    {ledgerView.rows.length} of {ledgerView.all} entries
                     {summaryLoading && !summaryFirstLoad && " · refreshing…"}
                   </p>
                 </div>
 
+                <div className="filter-bar">
+                  <label>
+                    Company
+                    <select
+                      value={lCompany}
+                      onChange={(e) => setLCompany(e.target.value)}
+                    >
+                      <option value="">All companies</option>
+                      {companyOptions.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    Type
+                    <select
+                      value={lType}
+                      onChange={(e) => setLType(e.target.value)}
+                    >
+                      <option value="">All types</option>
+                      <option value="Purchase">Purchase</option>
+                      <option value="Sale">Sale</option>
+                      <option value="Paid">Payment paid</option>
+                      <option value="Received">Payment received</option>
+                    </select>
+                  </label>
+
+                  <label>
+                    From
+                    <input
+                      type="date"
+                      value={lFrom}
+                      max={lTo || undefined}
+                      onChange={(e) => setLFrom(e.target.value)}
+                    />
+                  </label>
+
+                  <label>
+                    To
+                    <input
+                      type="date"
+                      value={lTo}
+                      min={lFrom || undefined}
+                      onChange={(e) => setLTo(e.target.value)}
+                    />
+                  </label>
+
+                  {ledgerFiltered && (
+                    <button
+                      type="button"
+                      className="secondary clear-filters"
+                      onClick={() => {
+                        setLCompany("");
+                        setLType("");
+                        setLFrom("");
+                        setLTo("");
+                        setSearch("");
+                      }}
+                    >
+                      <X size={14} />
+                      Clear filters
+                    </button>
+                  )}
+                </div>
+
                 {exportButtons}
-              </div>
-
-              <div className="filter-bar">
-                <label>
-                  Company
-                  <select
-                    value={lCompany}
-                    onChange={(e) => setLCompany(e.target.value)}
-                  >
-                    <option value="">All companies</option>
-                    {companyOptions.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label>
-                  Type
-                  <select
-                    value={lType}
-                    onChange={(e) => setLType(e.target.value)}
-                  >
-                    <option value="">All types</option>
-                    <option value="Purchase">Purchase</option>
-                    <option value="Sale">Sale</option>
-                    <option value="Paid">Payment paid</option>
-                    <option value="Received">Payment received</option>
-                  </select>
-                </label>
-
-                <label>
-                  From
-                  <input
-                    type="date"
-                    value={lFrom}
-                    max={lTo || undefined}
-                    onChange={(e) => setLFrom(e.target.value)}
-                  />
-                </label>
-
-                <label>
-                  To
-                  <input
-                    type="date"
-                    value={lTo}
-                    min={lFrom || undefined}
-                    onChange={(e) => setLTo(e.target.value)}
-                  />
-                </label>
-
-                {ledgerFiltered && (
-                  <button
-                    type="button"
-                    className="secondary clear-filters"
-                    onClick={() => {
-                      setLCompany("");
-                      setLType("");
-                      setLFrom("");
-                      setLTo("");
-                      setSearch("");
-                    }}
-                  >
-                    <X size={14} />
-                    Clear filters
-                  </button>
-                )}
               </div>
 
               {summaryFirstLoad ? (
@@ -3633,59 +3738,59 @@ export default function App() {
                   </p>
                 </div>
 
+                <div className="filter-bar">
+                  <label>
+                    Company
+                    <select
+                      value={sCompany}
+                      onChange={(e) => setSCompany(e.target.value)}
+                    >
+                      <option value="">All companies</option>
+                      {companyOptions.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    From
+                    <input
+                      type="date"
+                      value={sFrom}
+                      max={sTo || undefined}
+                      onChange={(e) => setSFrom(e.target.value)}
+                    />
+                  </label>
+
+                  <label>
+                    To
+                    <input
+                      type="date"
+                      value={sTo}
+                      min={sFrom || undefined}
+                      onChange={(e) => setSTo(e.target.value)}
+                    />
+                  </label>
+
+                  {(sCompany || sFrom || sTo) && (
+                    <button
+                      type="button"
+                      className="secondary clear-filters"
+                      onClick={() => {
+                        setSCompany("");
+                        setSFrom("");
+                        setSTo("");
+                      }}
+                    >
+                      <X size={14} />
+                      Clear filters
+                    </button>
+                  )}
+                </div>
+
                 {exportButtons}
-              </div>
-
-              <div className="filter-bar">
-                <label>
-                  Company
-                  <select
-                    value={sCompany}
-                    onChange={(e) => setSCompany(e.target.value)}
-                  >
-                    <option value="">All companies</option>
-                    {companyOptions.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label>
-                  From
-                  <input
-                    type="date"
-                    value={sFrom}
-                    max={sTo || undefined}
-                    onChange={(e) => setSFrom(e.target.value)}
-                  />
-                </label>
-
-                <label>
-                  To
-                  <input
-                    type="date"
-                    value={sTo}
-                    min={sFrom || undefined}
-                    onChange={(e) => setSTo(e.target.value)}
-                  />
-                </label>
-
-                {(sCompany || sFrom || sTo) && (
-                  <button
-                    type="button"
-                    className="secondary clear-filters"
-                    onClick={() => {
-                      setSCompany("");
-                      setSFrom("");
-                      setSTo("");
-                    }}
-                  >
-                    <X size={14} />
-                    Clear filters
-                  </button>
-                )}
               </div>
 
               {summaryFirstLoad ? (
@@ -4123,6 +4228,70 @@ export default function App() {
       </main>
 
       {/* ADD / EDIT MODAL */}
+
+      {dueExport && (
+        <div className="modal-backdrop" onClick={() => setDueExport(null)}>
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Choose the list to export"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head">
+              <div>
+                <p className="eyebrow">
+                  EXPORT {dueExport === "pdf" ? "PDF" : "EXCEL"}
+                </p>
+                <h2>Which list do you need?</h2>
+              </div>
+
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => setDueExport(null)}
+                aria-label="Close"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setDueExport(null)}
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                className="primary"
+                onClick={() => {
+                  const type = dueExport;
+                  setDueExport(null);
+                  runExport(type, "due");
+                }}
+              >
+                Payments due
+              </button>
+
+              <button
+                type="button"
+                className="primary"
+                onClick={() => {
+                  const type = dueExport;
+                  setDueExport(null);
+                  runExport(type, "pay");
+                }}
+              >
+                Payments to pay
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {modal && !isViewer && (
         <div className="modal-backdrop" onClick={() => setModal(false)}>
