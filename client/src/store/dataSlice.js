@@ -132,10 +132,10 @@ export const fetchList = createAsyncThunk(
 
 export const saveRecord = createAsyncThunk(
   "data/saveRecord",
-  async ({ api, page, id, body, business }, { dispatch }) => {
+  async ({ api, page, id, body, business }, { dispatch, getState }) => {
     const endpoint = `${page.toLowerCase()}${id ? `/${id}` : ""}`;
 
-    await api(endpoint, {
+    const saved = await api(endpoint, {
       method: id ? "PUT" : "POST",
       body: JSON.stringify(
         isScoped(page) && business ? { ...body, business } : body,
@@ -151,6 +151,16 @@ export const saveRecord = createAsyncThunk(
         jobs.push(dispatch(fetchStats({ api, business: "", force: true })));
     }
     await Promise.all(jobs);
+
+    // Server check: the list was just re-fetched from the server, so the
+    // saved row must be in it. `verified` tells the screen whether it is.
+    const savedId = saved?.id ?? id;
+    const list = peek(getState().data, page, business).lists[page];
+    const verified =
+      Boolean(savedId) &&
+      Boolean(list?.items.some((i) => String(i.id) === String(savedId)));
+
+    return { page, id: savedId, created: !id, verified };
   },
 );
 

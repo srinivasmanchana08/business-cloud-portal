@@ -146,6 +146,11 @@ const isOwner = (req) => req.user?.app_metadata?.role === "owner";
 // A viewer (app_metadata.role = "viewer") can read but never change anything.
 const isViewer = (req) => req.user?.app_metadata?.role === "viewer";
 
+// Update / delete: the owner account may change any row it can see (Supabase RLS
+// still decides what is visible). Other accounts only touch their own rows.
+const ownRows = (query, req) =>
+  isOwner(req) ? query : query.eq("owner_id", req.user.id);
+
 // Businesses shown as folders in the sidebar.
 const BUSINESSES = ["DDGS", "Maize and Turmeric"];
 
@@ -375,11 +380,10 @@ for (const [key, config] of Object.entries(resources)) {
         });
       }
 
-      const { data, error } = await req.supabase
-        .from(table)
-        .update(payload)
-        .eq("id", req.params.id)
-        .eq("owner_id", req.user.id)
+      const { data, error } = await ownRows(
+        req.supabase.from(table).update(payload).eq("id", req.params.id),
+        req,
+      )
         .select()
         .maybeSingle();
 
@@ -393,7 +397,7 @@ for (const [key, config] of Object.entries(resources)) {
       if (!data) {
         return res.status(404).json({
           error:
-            "This record no longer exists. Refresh the page and try again.",
+            "This record could not be updated. It may have been deleted, or it belongs to another account.",
         });
       }
 
@@ -407,12 +411,10 @@ for (const [key, config] of Object.entries(resources)) {
   // DELETE RECORD
   app.delete(`/api/${key}/:id`, async (req, res) => {
     try {
-      const { data, error } = await req.supabase
-        .from(table)
-        .delete()
-        .eq("id", req.params.id)
-        .eq("owner_id", req.user.id)
-        .select("id");
+      const { data, error } = await ownRows(
+        req.supabase.from(table).delete().eq("id", req.params.id),
+        req,
+      ).select("id");
 
       if (error) {
         console.error(`DELETE ${key}:`, error.message);

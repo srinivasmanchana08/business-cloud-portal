@@ -223,6 +223,23 @@ const RECORD_LABEL = {
   Orders: "Purchase order",
 };
 
+// table names shown in the "saved" popup
+const TABLE_NAME = {
+  Companies: "Companies",
+  Purchases: "Purchases",
+  Sales: "Sales",
+  Payments: "Payments",
+  Rents: "Vehicle Rent",
+  Orders: "Purchase Orders",
+};
+
+const savedLine = (r, page) =>
+  `${RECORD_LABEL[page]} ${r.created ? "added to" : "updated in"} the ${TABLE_NAME[page]} table - ${
+    r.verified
+      ? "server confirmed ✓"
+      : "saved, but the server list could not confirm it yet (press refresh)"
+  }`;
+
 // vehicle numbers compared without spaces / dashes / case
 const normVehicle = (v) =>
   String(v || "")
@@ -570,6 +587,17 @@ export default function App() {
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  // popup shown after a record is added / updated / deleted
+  const [notice, setNotice] = useState(null);
+  useEffect(() => {
+    if (!notice) return undefined;
+    const timer = setTimeout(
+      () => setNotice(null),
+      notice.tone === "error" ? 9000 : 6000,
+    );
+    return () => clearTimeout(timer);
+  }, [notice]);
   const [search, setSearch] = useState("");
 
   const [modal, setModal] = useState(false);
@@ -2223,6 +2251,12 @@ export default function App() {
     }
   }
 
+  // close button inside the open sidebar
+  function closeMenu() {
+    if (window.matchMedia("(max-width: 900px)").matches) setMobile(false);
+    else setWide(false);
+  }
+
   // go to a page of a business folder (used by the tab strip)
   function goToPage(name, business) {
     dispatch(setBusiness(business));
@@ -2284,6 +2318,12 @@ export default function App() {
       ["rate", "Rate", "number"],
       ["gross_total", "Gross total (₹)", "number"],
       ["payment_due_date", "Payment due date", "date"],
+      ["unload_date", "Unload date", "date"],
+      [
+        "unload_quantity",
+        "Unload quantity (qtl) - leave empty if not unloaded yet",
+        "number",
+      ],
       ["notes", "Notes", "text"],
     ],
 
@@ -2432,6 +2472,49 @@ export default function App() {
   // 16. SAVE / UPDATE RECORD
   // ===================================================
 
+  // Keeps Vehicle Rent in step with Purchases: a new purchase with a vehicle
+  // number gets its rent row (amount can be filled in later); editing a
+  // purchase updates the rent row that belonged to it. Owner only, because
+  // vehicle rent data is owner only.
+  async function syncRentForPurchase(body, previous) {
+    const sameVehicle = (r, v) =>
+      normVehicle(r.vehicle_number) === normVehicle(v);
+    const sameBill = (r, b) =>
+      sameVehicle(r, b.vehicle_number) &&
+      r.company_id === b.company_id &&
+      dayOf(r.entry_date) === dayOf(b.entry_date);
+
+    const rents = rentsList.items;
+    const rentBody = {
+      company_id: body.company_id,
+      entry_date: body.entry_date,
+      vehicle_number: body.vehicle_number,
+    };
+
+    if (previous) {
+      const old = previous.vehicle_number
+        ? rents.find((r) => sameBill(r, previous))
+        : null;
+      if (old) {
+        return dispatch(
+          saveRecord({
+            api,
+            page: "Rents",
+            id: old.id,
+            body: rentBody,
+            business: biz,
+          }),
+        ).unwrap();
+      }
+    }
+
+    if (rents.some((r) => sameBill(r, body))) return { exists: true };
+
+    return dispatch(
+      saveRecord({ api, page: "Rents", body: rentBody, business: biz }),
+    ).unwrap();
+  }
+
   async function save(event) {
     event.preventDefault();
 
@@ -2488,7 +2571,7 @@ export default function App() {
         body.order_total = Number(body.quantity || 0) * Number(body.rate || 0);
       }
 
-      await dispatch(
+      const result = await dispatch(
         saveRecord({
           api,
           page: dataPage,
@@ -2498,10 +2581,53 @@ export default function App() {
         }),
       ).unwrap();
 
+      // purchase saved -> also create / update its vehicle rent row
+      const lines = [savedLine(result, dataPage)];
+      let tone = "ok";
+
+      if (dataPage === "Purchases" && isOwner && body.vehicle_number) {
+        try {
+          const rent = await syncRentForPurchase(body, editing);
+          lines.push(
+            rent?.exists
+              ? "Vehicle Rent table already has this vehicle and date - no duplicate added"
+              : savedLine(rent, "Rents"),
+          );
+        } catch (rentErr) {
+          tone = "error";
+          lines.push(
+            `Vehicle Rent entry NOT saved: ${getErrorMessage(rentErr)}`,
+          );
+        }
+      }
+
+      if (dataPage === "Sales") {
+        lines.push(
+          "Unload Status table now lists this sale (" +
+            (Number(body.unload_quantity || 0) > 0
+              ? "unload details saved"
+              : "status: Pending") +
+            ")",
+        );
+      }
+
+      if (!result.verified) tone = "error";
+
+      setNotice({
+        tone,
+        title: editing ? "Record updated" : "New entry added",
+        lines,
+      });
+
       setModal(false);
       setEditing(null);
     } catch (err) {
       setError(getErrorMessage(err));
+      setNotice({
+        tone: "error",
+        title: "Not saved",
+        lines: [getErrorMessage(err)],
+      });
     } finally {
       setBusy(false);
     }
@@ -2523,7 +2649,7 @@ export default function App() {
       const raw = form.get("unload_quantity");
       const quantity = raw === "" || raw == null ? 0 : Number(raw);
 
-      await dispatch(
+      const result = await dispatch(
         saveRecord({
           api,
           page: "Sales",
@@ -2537,8 +2663,24 @@ export default function App() {
       ).unwrap();
 
       setUnloadEdit(null);
+      setNotice({
+        tone: result.verified ? "ok" : "error",
+        title: "Unload updated",
+        lines: [
+          `Unload details saved in the Sales / Unload Status table - ${
+            result.verified
+              ? "server confirmed ✓"
+              : "could not be confirmed yet"
+          }`,
+        ],
+      });
     } catch (err) {
       setError(getErrorMessage(err));
+      setNotice({
+        tone: "error",
+        title: "Not saved",
+        lines: [getErrorMessage(err)],
+      });
     } finally {
       setBusy(false);
     }
@@ -2556,6 +2698,13 @@ export default function App() {
       await dispatch(
         deleteRecord({ api, page: dataPage, id, business: biz }),
       ).unwrap();
+      setNotice({
+        tone: "ok",
+        title: "Record deleted",
+        lines: [
+          `${RECORD_LABEL[dataPage]} removed from the ${TABLE_NAME[dataPage]} table`,
+        ],
+      });
     } catch (err) {
       setError(getErrorMessage(err));
       refresh(true);
@@ -2674,7 +2823,25 @@ export default function App() {
     <div className={`app-shell ${wide ? "sidebar-wide" : ""}`}>
       {/* SIDEBAR */}
 
+      {mobile && (
+        <div
+          className="sidebar-scrim"
+          onClick={() => setMobile(false)}
+          aria-hidden="true"
+        />
+      )}
+
       <aside className={`sidebar ${mobile ? "open" : ""}`}>
+        <button
+          type="button"
+          className="sidebar-close"
+          onClick={closeMenu}
+          title="Close menu"
+          aria-label="Close menu"
+        >
+          <X size={18} />
+        </button>
+
         <div className="brand">
           <div className="brand-mark">MS</div>
 
@@ -2834,6 +3001,7 @@ export default function App() {
               page !== DUES && (
                 <button
                   className="primary"
+                  aria-label={`Add ${RECORD_LABEL[dataPage]}`}
                   onClick={() => {
                     setEditing(null);
                     setError("");
@@ -2841,7 +3009,7 @@ export default function App() {
                   }}
                 >
                   <Plus size={16} />
-                  Add {RECORD_LABEL[dataPage]}
+                  <span className="add-text">Add {RECORD_LABEL[dataPage]}</span>
                 </button>
               )}
 
@@ -4679,6 +4847,29 @@ export default function App() {
       </main>
 
       {/* ADD / EDIT MODAL */}
+
+      {notice && (
+        <div
+          className={`toast ${notice.tone}`}
+          role="status"
+          aria-live="polite"
+        >
+          <div className="toast-head">
+            <b>{notice.title}</b>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => setNotice(null)}
+              aria-label="Close"
+            >
+              <X size={16} />
+            </button>
+          </div>
+          {notice.lines.map((line) => (
+            <p key={line}>{line}</p>
+          ))}
+        </div>
+      )}
 
       {dueExport && (
         <div className="modal-backdrop" onClick={() => setDueExport(null)}>

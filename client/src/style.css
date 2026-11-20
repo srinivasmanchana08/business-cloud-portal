@@ -2220,3 +2220,330 @@ tbody tr:hover {
 .kpi-go {
   margin-left: auto;
 }
+
+/* =====================================================
+   COMPACT HEADER / FOOTER, STICKY TAB STRIP, SIDEBAR CLOSE BUTTON
+   ===================================================== */
+
+:root {
+  --top-h: 60px;
+  --tab-h: 40px;
+  --gap: 10px;
+}
+
+@media (max-width: 900px) {
+  :root {
+    --top-h: 50px;
+    --tab-h: 38px;
+    --gap: 6px;
+  }
+}
+
+@media (max-width: 560px) {
+  :root {
+    --top-h: 48px;
+    --tab-h: 36px;
+    --gap: 4px;
+  }
+}
+
+/* top bar: fixed height, always one row, always visible */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  height: var(--top-h);
+  flex-wrap: nowrap;
+}
+
+/* the tab strip (Menu / Ledger / Payment Dues / ...) stays under the top bar */
+.subtabs {
+  position: sticky;
+  top: var(--top-h);
+  z-index: 5;
+  height: var(--tab-h);
+}
+
+.subtab {
+  height: calc(var(--tab-h) - 10px);
+}
+
+/* table panels fill exactly what is left of the screen */
+.panel.fill {
+  height: calc(100vh - var(--top-h) - var(--tab-h) - 2 * var(--gap));
+  height: calc(100dvh - var(--top-h) - var(--tab-h) - 2 * var(--gap));
+}
+
+.dues-panel .table-wrap {
+  max-height: calc(100dvh - var(--top-h) - var(--tab-h) - 150px);
+}
+
+.content {
+  padding: var(--gap);
+}
+
+/* ---------- sidebar close button + dim backdrop ---------- */
+
+.sidebar-close {
+  display: none;
+  position: absolute;
+  top: 12px;
+  right: 10px;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 50%;
+  background: #eaf4fb;
+  color: #4b6a85;
+  place-items: center;
+  z-index: 2;
+}
+
+.sidebar-close:hover {
+  background: #d3ecf8;
+  color: var(--navy);
+}
+
+.sidebar-scrim {
+  display: none;
+}
+
+@media (min-width: 901px) {
+  .app-shell.sidebar-wide .sidebar-close {
+    display: grid;
+  }
+}
+
+@media (max-width: 900px) {
+  .sidebar {
+    z-index: 8;
+  }
+
+  .sidebar.open .sidebar-close {
+    display: grid;
+  }
+
+  .sidebar-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 7;
+    background: rgba(27, 50, 78, 0.42);
+  }
+
+  /* title + export buttons on one line, filters on the next */
+  .table-toolbar {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+
+  .table-toolbar>div:first-child {
+    flex: 1 1 auto;
+  }
+
+  .table-toolbar .export-actions {
+    order: 2;
+  }
+
+  .table-toolbar .filter-bar {
+    order: 3;
+    flex: 1 0 100%;
+  }
+
+  .panel.fill {
+    padding: 10px;
+    border-radius: 14px;
+  }
+
+  th {
+    padding: 8px 10px;
+  }
+
+  td {
+    padding: 8px 10px;
+  }
+}
+
+@media (max-width: 560px) {
+  .topbar {
+    height: var(--top-h);
+    flex-wrap: nowrap;
+    gap: 6px;
+    padding: 0 8px;
+  }
+
+  .topbar .mobile-menu {
+    margin: 0;
+    padding: 6px;
+    flex: 0 0 auto;
+  }
+
+  .topbar-title {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 30vw;
+  }
+
+  .topbar-title b {
+    font-size: 15px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .topbar-title .muted,
+  .top-avatar {
+    display: none;
+  }
+
+  /* the search box stays on the same row and takes the free space */
+  .top-search {
+    order: 0;
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: none;
+    margin: 0;
+    padding: 5px 9px;
+  }
+
+  .top-actions {
+    gap: 2px;
+    flex: 0 0 auto;
+    margin-left: auto;
+  }
+
+  .topbar .icon-btn {
+    padding: 6px;
+  }
+
+  .topbar .primary {
+    padding: 8px;
+    min-width: 34px;
+  }
+
+  .topbar .primary .add-text {
+    display: none;
+  }
+
+  .subtabs {
+    padding: 0 6px;
+  }
+
+  .subtab {
+    padding: 0 10px;
+    font-size: 12.5px;
+  }
+
+  .content {
+    padding: 4px;
+  }
+
+  .panel.fill {
+    padding: 8px;
+  }
+
+  .table-toolbar h3 {
+    font-size: 14px;
+    margin-bottom: 0;
+  }
+
+  .export-actions .secondary {
+    padding: 6px 9px;
+    font-size: 11px;
+  }
+
+  .filter-bar {
+    padding: 0;
+  }
+
+  .filter-bar label {
+    font-size: 9.5px;
+  }
+
+  .filter-bar select,
+  .filter-bar input {
+    min-width: 108px;
+    padding: 5px 8px;
+    font-size: 11.5px;
+  }
+
+  th {
+    padding: 7px 8px;
+    font-size: 9.5px;
+  }
+
+  td {
+    padding: 7px 8px;
+    font-size: 11.5px;
+  }
+
+  /* compact footer: totals only, no label */
+  .panel.fill .totals-bar,
+  .panel.fill .totals-bar.one-line {
+    margin-top: 4px;
+    padding: 4px 10px;
+    border-radius: 10px;
+  }
+
+  .totals-bar.one-line .totals-label {
+    display: none;
+  }
+
+  .totals-bar.one-line .totals-items {
+    gap: 16px;
+    justify-content: flex-start;
+  }
+
+  .totals-bar.one-line .totals-items span {
+    font-size: 9.5px;
+  }
+
+  .totals-bar.one-line .totals-items b {
+    font-size: 12px;
+  }
+
+  .dash {
+    margin: 2px;
+    padding: 10px;
+    border-radius: 14px;
+  }
+}
+
+
+/* ---------- "saved" popup ---------- */
+.toast {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 1000;
+  width: min(380px, calc(100vw - 36px));
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #172033;
+  border: 1px solid #cfe9d8;
+  border-left: 5px solid #1f9d55;
+  box-shadow: 0 10px 30px rgba(23, 32, 51, 0.18);
+}
+
+.toast.error {
+  border-color: #f3c9c9;
+  border-left-color: #d64545;
+}
+
+.toast-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.toast p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.4;
+}
