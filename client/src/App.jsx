@@ -240,6 +240,85 @@ const savedLine = (r, page) =>
       : "saved, but the server list could not confirm it yet (press refresh)"
   }`;
 
+// ---------- duplicate detection ----------
+const lc = (v) =>
+  String(v ?? "")
+    .trim()
+    .toLowerCase();
+const num3 = (v) => Number(Number(v || 0).toFixed(3));
+
+// true when record `a` and record `b` look like the same entry entered twice
+function isDuplicate(page, a, b) {
+  const sameCo = a.company_id === b.company_id;
+
+  if (page === "Purchases" || page === "Sales") {
+    const va = normVehicle(a.vehicle_number);
+    const vb = normVehicle(b.vehicle_number);
+    if (!va && !lc(a.voucher_no)) return false; // nothing to compare on
+    if (!sameCo || va !== vb) return false;
+    if (dayOf(a.entry_date) !== dayOf(b.entry_date)) return false;
+    if (num3(a.quantity) !== num3(b.quantity)) return false;
+    // two different voucher numbers = two different bills
+    if (
+      lc(a.voucher_no) &&
+      lc(b.voucher_no) &&
+      lc(a.voucher_no) !== lc(b.voucher_no)
+    )
+      return false;
+    return true;
+  }
+
+  if (page === "Payments") {
+    return (
+      sameCo &&
+      dayOf(a.payment_date) === dayOf(b.payment_date) &&
+      a.direction === b.direction &&
+      num3(a.amount) === num3(b.amount) &&
+      lc(a.reference) === lc(b.reference)
+    );
+  }
+
+  if (page === "Orders") {
+    if (!sameCo || dayOf(a.order_date) !== dayOf(b.order_date)) return false;
+    if (lc(a.po_number) || lc(b.po_number))
+      return lc(a.po_number) === lc(b.po_number);
+    return (
+      num3(a.quantity) === num3(b.quantity) && num3(a.rate) === num3(b.rate)
+    );
+  }
+
+  if (page === "Rents") {
+    return (
+      sameCo &&
+      dayOf(a.entry_date) === dayOf(b.entry_date) &&
+      normVehicle(a.vehicle_number) === normVehicle(b.vehicle_number)
+    );
+  }
+
+  if (page === "Companies")
+    return Boolean(lc(a.name)) && lc(a.name) === lc(b.name);
+
+  return false;
+}
+
+// Payments are left out of the bulk clean-up: two equal payments on one day
+// can be real. They still get the "are you sure" question when added.
+const DUP_CLEAN_PAGES = ["Companies", "Purchases", "Sales", "Orders", "Rents"];
+
+// groups of the same entry; the first row of each group (oldest) is the one kept
+function findDuplicateGroups(page, items) {
+  const sorted = [...items].sort((x, y) =>
+    String(x.created_at || "").localeCompare(String(y.created_at || "")),
+  );
+  const groups = [];
+  sorted.forEach((row) => {
+    const group = groups.find((g) => isDuplicate(page, g[0], row));
+    if (group) group.push(row);
+    else groups.push([row]);
+  });
+  return groups.filter((g) => g.length > 1);
+}
+
 // vehicle numbers compared without spaces / dashes / case
 const normVehicle = (v) =>
   String(v || "")
@@ -493,6 +572,8 @@ export default function App() {
   const storeError = useSelector((s) => s.data.error);
   const companies = useSelector((s) => s.data.lists.Companies.items);
   const list = useSelector((s) => s.data.lists[page]);
+  const dataItems =
+    useSelector((s) => s.data.lists[dataPage]?.items) || EMPTY_ROWS;
   const filters = useSelector((s) => s.data.filters[page]) || EMPTY_FILTERS;
 
   const purchasesList = useSelector((s) => s.data.lists.Purchases);
@@ -587,6 +668,18 @@ export default function App() {
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  // duplicate question when adding, and the "remove duplicates" clean-up
+  const [dupAsk, setDupAsk] = useState(null);
+  const [dupClean, setDupClean] = useState(null);
+
+  const dupGroups = useMemo(
+    () =>
+      DUP_CLEAN_PAGES.includes(dataPage)
+        ? findDuplicateGroups(dataPage, dataItems)
+        : [],
+    [dataPage, dataItems],
+  );
 
   // popup shown after a record is added / updated / deleted
   const [notice, setNotice] = useState(null);
@@ -1728,6 +1821,44 @@ export default function App() {
 
   const unloadFiltered = Boolean(uCompany || uStatus || uFrom || uTo || search);
 
+  // ---- do the linked tables match?
+  //   Purchases -> Vehicle Rent (one rent row per purchase vehicle)
+  //   Sales     -> Unload (the Unload page lists every sale)
+  const [syncCheck, setSyncCheck] = useState(false);
+  const tableCheck = useMemo(() => {
+    const withVehicle = purchasesList.items.filter((p) =>
+      normVehicle(p.vehicle_number),
+    );
+    const { linked } = matchRents(rentsList.items, withVehicle);
+    const linkedIds = new Set(Object.values(linked).map((p) => p.id));
+
+    // Same vehicle + same date + same company = ONE trip, even when it was
+    // billed in parts at different rates. Rent is paid once for the combined
+    // quantity, so a trip needs only one Vehicle Rent row.
+    const trips = new Map();
+    withVehicle.forEach((p) => {
+      const key = `${normVehicle(p.vehicle_number)}|${dayOf(p.entry_date)}|${p.company_id}`;
+      if (!trips.has(key)) trips.set(key, []);
+      trips.get(key).push(p);
+    });
+    const tripList = [...trips.values()];
+
+    return {
+      purchases: purchasesList.items.length,
+      trips: tripList.length,
+      noVehicle: purchasesList.items.length - withVehicle.length,
+      rents: rentsList.items.length,
+      // one entry (the first purchase) per trip that has no rent row yet
+      missing: tripList
+        .filter((group) => !group.some((p) => linkedIds.has(p.id)))
+        .map((group) => group[0]),
+      rentsWithoutPurchase: rentsList.items.length - Object.keys(linked).length,
+      sales: salesList.items.length,
+      unload: unloadView.all,
+      loaded: purchasesList.loaded && rentsList.loaded && salesList.loaded,
+    };
+  }, [purchasesList, rentsList, salesList, unloadView.all]);
+
   // ===================================================
   // 10d. EXPORT (Excel / PDF) — exports exactly what is on screen
   // ===================================================
@@ -2571,6 +2702,136 @@ export default function App() {
         body.order_total = Number(body.quantity || 0) * Number(body.rate || 0);
       }
 
+      // same company / date / vehicle / quantity already saved? ask first
+      const matches = dataItems.filter(
+        (r) => r.id !== editing?.id && isDuplicate(dataPage, body, r),
+      );
+
+      if (matches.length) {
+        setDupAsk({ page: dataPage, body, matches, editing: Boolean(editing) });
+        return;
+      }
+
+      await commitSave(body);
+    } catch (err) {
+      setError(getErrorMessage(err));
+      setNotice({
+        tone: "error",
+        title: "Not saved",
+        lines: [getErrorMessage(err)],
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // one-line text for a record in the duplicate lists
+  function describeRow(page, r) {
+    const co = companyMap[r.company_id] || "—";
+    if (page === "Companies") return `${r.name} (${r.company_type || "—"})`;
+    if (page === "Payments")
+      return `${dayOf(r.payment_date)} · ${co} · ${r.direction} · ${money(r.amount)}`;
+    if (page === "Orders")
+      return `${dayOf(r.order_date)} · ${co} · PO ${r.po_number || "—"} · ${qty(r.quantity)} qtl`;
+    if (page === "Rents")
+      return `${dayOf(r.entry_date)} · ${co} · ${r.vehicle_number || "—"} · ${r.amount == null ? "no amount" : money(r.amount)}`;
+    const total = page === "Sales" ? r.gross_total : r.purchase_total;
+    return `${dayOf(r.entry_date)} · ${co} · ${r.vehicle_number || "—"} · voucher ${r.voucher_no || "—"} · ${qty(r.quantity)} qtl · ${money(total)}`;
+  }
+
+  // deletes the extra copies, keeps the oldest of each group
+  async function removeDuplicates() {
+    if (!dupClean) return;
+    setError("");
+    setBusy(true);
+
+    let removed = 0;
+    let failed = 0;
+
+    for (const group of dupClean.groups) {
+      for (const row of group.slice(1)) {
+        try {
+          await dispatch(
+            deleteRecord({
+              api,
+              page: dupClean.page,
+              id: row.id,
+              business: biz,
+            }),
+          ).unwrap();
+          removed += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+    }
+
+    setBusy(false);
+    setDupClean(null);
+    refresh(true);
+    setNotice({
+      tone: failed ? "error" : "ok",
+      title: "Duplicates removed",
+      lines: [
+        `${removed} duplicate ${removed === 1 ? "entry" : "entries"} deleted from the ${TABLE_NAME[dupClean.page]} table`,
+        ...(failed
+          ? [
+              `${failed} could not be deleted (they may belong to another account)`,
+            ]
+          : []),
+      ],
+    });
+  }
+
+  // copies every purchase that has no vehicle rent row into the Vehicle Rent table
+  async function copyMissingRents() {
+    if (!tableCheck.missing.length) return;
+    setError("");
+    setBusy(true);
+
+    let done = 0;
+    let failed = 0;
+
+    for (const p of tableCheck.missing) {
+      try {
+        await api("rents", {
+          method: "POST",
+          body: JSON.stringify({
+            company_id: p.company_id,
+            entry_date: p.entry_date,
+            vehicle_number: p.vehicle_number,
+            business: p.business || biz || "DDGS",
+          }),
+        });
+        done += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+
+    // re-read from the server and count again
+    await dispatch(
+      fetchList({ api, page: "Rents", business: biz, force: true }),
+    );
+
+    setBusy(false);
+    setSyncCheck(false);
+    setNotice({
+      tone: failed ? "error" : "ok",
+      title: "Purchases copied to Vehicle Rent",
+      lines: [
+        `${done} ${done === 1 ? "entry" : "entries"} copied from the Purchases table to the Vehicle Rent table`,
+        ...(failed ? [`${failed} could not be copied - try again`] : []),
+      ],
+    });
+  }
+
+  // saves the record (after the duplicate question, if there was one)
+  async function commitSave(body) {
+    setError("");
+    setBusy(true);
+
+    try {
       const result = await dispatch(
         saveRecord({
           api,
@@ -2993,6 +3254,55 @@ export default function App() {
           )}
 
           <div className="top-actions">
+            {isOwner &&
+              !isViewer &&
+              page !== "Dashboard" &&
+              page !== SUMMARY &&
+              page !== LEDGER &&
+              page !== DUES &&
+              (page === UNLOAD ||
+                ["Purchases", "Sales", "Rents"].includes(dataPage)) && (
+                <button
+                  className="icon-btn check-btn"
+                  title={
+                    tableCheck.missing.length
+                      ? `Check tables - ${tableCheck.missing.length} vehicle trip(s) missing in Vehicle Rent`
+                      : "Check tables (Purchases = Vehicle Rent, Sales = Unload)"
+                  }
+                  aria-label="Check tables"
+                  onClick={() => setSyncCheck(true)}
+                >
+                  <ListChecks size={18} />
+                  {tableCheck.missing.length > 0 && (
+                    <span className="check-badge">
+                      {tableCheck.missing.length}
+                    </span>
+                  )}
+                </button>
+              )}
+
+            {!isViewer &&
+              dupGroups.length > 0 &&
+              page !== "Dashboard" &&
+              page !== SUMMARY &&
+              page !== LEDGER &&
+              page !== UNLOAD &&
+              page !== DUES && (
+                <button
+                  className="secondary"
+                  title="Same company, date, vehicle and quantity entered more than once"
+                  onClick={() =>
+                    setDupClean({ page: dataPage, groups: dupGroups })
+                  }
+                >
+                  <Trash2 size={16} />
+                  <span className="add-text">
+                    Duplicates (
+                    {dupGroups.reduce((n, g) => n + g.length - 1, 0)})
+                  </span>
+                </button>
+              )}
+
             {!isViewer &&
               page !== "Dashboard" &&
               page !== SUMMARY &&
@@ -5122,6 +5432,210 @@ export default function App() {
               </button>
             </div>
           </form>
+        </div>
+      )}
+      {dupAsk && !isViewer && (
+        <div className="modal-backdrop" onClick={() => setDupAsk(null)}>
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head">
+              <div>
+                <p className="eyebrow">POSSIBLE DUPLICATE</p>
+                <h2>This entry already exists</h2>
+                <p className="muted">
+                  Same company, date, vehicle and quantity is already in the{" "}
+                  {TABLE_NAME[dupAsk.page]} table:
+                </p>
+              </div>
+            </div>
+
+            <ul className="dup-list">
+              {dupAsk.matches.map((r) => (
+                <li key={r.id}>{describeRow(dupAsk.page, r)}</li>
+              ))}
+            </ul>
+
+            <p>
+              Do you still want to {dupAsk.editing ? "save" : "add"} it as
+              another entry?
+            </p>
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setDupAsk(null)}
+              >
+                No, go back
+              </button>
+              <button
+                type="button"
+                className="primary"
+                disabled={busy}
+                onClick={() => {
+                  const body = dupAsk.body;
+                  setDupAsk(null);
+                  commitSave(body);
+                }}
+              >
+                Yes, {dupAsk.editing ? "save" : "add"} anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {syncCheck && isOwner && (
+        <div className="modal-backdrop" onClick={() => setSyncCheck(false)}>
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head">
+              <div>
+                <p className="eyebrow">TABLE CHECK</p>
+                <h2>Do the linked tables match?</h2>
+              </div>
+            </div>
+
+            <ul className="dup-list">
+              <li>
+                <b>Purchases → Vehicle Rent</b>
+                <br />
+                Purchases: {tableCheck.purchases} ({tableCheck.trips} vehicle
+                trips
+                {tableCheck.noVehicle
+                  ? `, ${tableCheck.noVehicle} without a vehicle number`
+                  : ""}
+                ) · Vehicle Rent rows: {tableCheck.rents}
+                <br />
+                <span className="muted">
+                  Purchases of the same vehicle on the same date are one trip -
+                  rent is paid once on the combined quantity.
+                </span>
+                <br />
+                {tableCheck.missing.length ? (
+                  <b>
+                    {tableCheck.missing.length} vehicle trip
+                    {tableCheck.missing.length === 1 ? "" : "s"} missing from
+                    Vehicle Rent
+                  </b>
+                ) : (
+                  <b>Match ✓ every vehicle trip has its vehicle rent row</b>
+                )}
+                {tableCheck.rentsWithoutPurchase > 0 && (
+                  <>
+                    <br />
+                    {tableCheck.rentsWithoutPurchase} rent row
+                    {tableCheck.rentsWithoutPurchase === 1 ? "" : "s"} have no
+                    matching purchase (left untouched)
+                  </>
+                )}
+              </li>
+              <li>
+                <b>Sales → Unload</b>
+                <br />
+                Sales: {tableCheck.sales} · Unload rows: {tableCheck.unload}
+                <br />
+                <b>
+                  {tableCheck.sales === tableCheck.unload
+                    ? "Match ✓ every sale is listed in Unload"
+                    : "Counts differ - press Refresh and check again"}
+                </b>
+              </li>
+            </ul>
+
+            {!tableCheck.loaded && (
+              <p className="muted">
+                Some tables are still loading - press Refresh and check again.
+              </p>
+            )}
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setSyncCheck(false)}
+              >
+                Close
+              </button>
+              {tableCheck.missing.length > 0 && (
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={busy || !tableCheck.loaded}
+                  onClick={copyMissingRents}
+                >
+                  {busy
+                    ? "Copying..."
+                    : `Add ${tableCheck.missing.length} missing to Vehicle Rent`}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {dupClean && !isViewer && (
+        <div className="modal-backdrop" onClick={() => setDupClean(null)}>
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head">
+              <div>
+                <p className="eyebrow">REMOVE DUPLICATES</p>
+                <h2>
+                  {dupClean.groups.reduce((n, g) => n + g.length - 1, 0)}{" "}
+                  duplicate{" "}
+                  {dupClean.groups.reduce((n, g) => n + g.length - 1, 0) === 1
+                    ? "entry"
+                    : "entries"}{" "}
+                  in {TABLE_NAME[dupClean.page]}
+                </h2>
+                <p className="muted">
+                  The oldest entry of each group is kept. The extra copies are
+                  deleted.
+                </p>
+              </div>
+            </div>
+
+            <ul className="dup-list">
+              {dupClean.groups.map((g) => (
+                <li key={g[0].id}>
+                  {describeRow(dupClean.page, g[0])}
+                  <br />
+                  <b>keep 1, delete {g.length - 1}</b>
+                </li>
+              ))}
+            </ul>
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setDupClean(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary"
+                disabled={busy}
+                onClick={removeDuplicates}
+              >
+                {busy ? "Removing..." : "Delete the duplicates"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
