@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createClient } from "@supabase/supabase-js";
 import { useDispatch, useSelector } from "react-redux";
 import {
@@ -29,6 +35,7 @@ import {
   ArrowUp,
   ArrowUpDown,
   Scale,
+  AlertTriangle,
   Truck,
   Banknote,
   ClipboardList,
@@ -758,6 +765,7 @@ export default function App() {
   const [tFrom, setTFrom] = useState("");
   const [tTo, setTTo] = useState("");
   const [tStatus, setTStatus] = useState("");
+  const [tMismatch, setTMismatch] = useState(false); // only rows with a qty difference
   const [tSort, setTSort] = useState({ key: "pdate", dir: "asc" });
 
   // Vehicle Rent filters
@@ -1265,8 +1273,52 @@ export default function App() {
   // ===================================================
 
   const tracking = useMemo(() => {
-    const purchases = purchasesList.items.map((p) => ({ ...p, _sales: [] }));
     const { rentByPurchase } = matchRents(rentsList.items, purchasesList.items);
+
+    // Same vehicle + same date + same company = ONE load, even when it was
+    // billed in parts (different quantity / rate). Show it as one row with the
+    // combined quantity and total, and the average rate. Rent is also added up.
+    const loads = new Map();
+    purchasesList.items.forEach((p) => {
+      const vehicle = normVehicle(p.vehicle_number);
+      const key = vehicle
+        ? `${vehicle}|${dayOf(p.entry_date)}|${p.company_id}`
+        : `single-${p.id}`;
+      if (!loads.has(key)) loads.set(key, []);
+      loads.get(key).push(p);
+    });
+
+    const round3 = (n) => Math.round(n * 1000) / 1000;
+
+    const purchases = [...loads.values()].map((list) => {
+      const first = list[0];
+      if (list.length === 1) {
+        return { ...first, _sales: [], _vouchers: [first.voucher_no] };
+      }
+
+      const quantity = round3(
+        list.reduce((t, p) => t + Number(p.quantity || 0), 0),
+      );
+      const purchase_total = list.reduce(
+        (t, p) => t + Number(p.purchase_total || 0),
+        0,
+      );
+
+      return {
+        ...first,
+        quantity,
+        purchase_total,
+        rate: quantity > 0 ? purchase_total / quantity : first.rate,
+        voucher_no: list
+          .map((p) => p.voucher_no)
+          .filter(Boolean)
+          .join(" + "),
+        _parts: list.length,
+        _vouchers: list.map((p) => p.voucher_no),
+        _rent: list.reduce((t, p) => t + (rentByPurchase[p.id] || 0), 0),
+        _sales: [],
+      };
+    });
 
     const sales = [...salesList.items].sort((a, b) =>
       dayOf(a.entry_date).localeCompare(dayOf(b.entry_date)),
@@ -1276,8 +1328,11 @@ export default function App() {
     const byVehicle = {};
 
     purchases.forEach((p) => {
-      const v = normVehicle(p.voucher_no);
-      if (v) byVoucher[v] = p;
+      // a sale may refer to any one of the combined voucher numbers
+      p._vouchers.forEach((voucher) => {
+        const v = normVehicle(voucher);
+        if (v) byVoucher[v] = p;
+      });
 
       const k = normVehicle(p.vehicle_number);
       if (k) (byVehicle[k] = byVehicle[k] || []).push(p);
@@ -1306,10 +1361,26 @@ export default function App() {
 
     const all = [];
 
+    // quantity check: purchase qty must equal everything sold from it
+    const MISMATCH_TOL = 0.05; // qtl, ignores rounding
+    const mismatch = { count: 0, net: 0 };
+
     purchases.forEach((p) => {
       if (!p._sales.length) {
         all.push({ key: `p-${p.id}`, status: "Pending", p, s: null });
       } else {
+        const soldQty = p._sales.reduce(
+          (t, x) => t + Number(x.quantity || 0),
+          0,
+        );
+        const diff = round3(Number(p.quantity || 0) - soldQty);
+        const isMismatch = Math.abs(diff) > MISMATCH_TOL;
+
+        if (isMismatch) {
+          mismatch.count += 1;
+          mismatch.net += diff;
+        }
+
         p._sales.forEach((s) =>
           all.push({
             key: `p-${p.id}-${s.id}`,
@@ -1317,6 +1388,9 @@ export default function App() {
             p,
             s,
             single: p._sales.length === 1,
+            soldQty,
+            diff,
+            mismatch: isMismatch,
           }),
         );
       }
@@ -1355,6 +1429,7 @@ export default function App() {
         if (tFrom && date < tFrom) return false;
         if (tTo && date > tTo) return false;
         if (tStatus && r.status !== tStatus) return false;
+        if (tMismatch && !r.mismatch) return false;
 
         if (q) {
           const text = [
@@ -1374,7 +1449,7 @@ export default function App() {
         return true;
       })
       .map((r) => {
-        const rent = r.p ? rentByPurchase[r.p.id] || 0 : 0;
+        const rent = r.p ? (r.p._rent ?? rentByPurchase[r.p.id] ?? 0) : 0;
 
         return {
           ...r,
@@ -1428,7 +1503,9 @@ export default function App() {
 
     totals.margin = totals.sTotal - totals.soldPurchase - totals.soldRent;
 
-    return { rows: rowsOut, totals };
+    mismatch.net = round3(mismatch.net);
+
+    return { rows: rowsOut, totals, mismatch };
   }, [
     purchasesList,
     salesList,
@@ -1440,12 +1517,13 @@ export default function App() {
     tFrom,
     tTo,
     tStatus,
+    tMismatch,
     tSort,
     search,
   ]);
 
   const trackFiltered = Boolean(
-    tPCompany || tSCompany || tFrom || tTo || tStatus || search,
+    tPCompany || tSCompany || tFrom || tTo || tStatus || tMismatch || search,
   );
 
   // ===================================================
@@ -1825,6 +1903,54 @@ export default function App() {
   //   Purchases -> Vehicle Rent (one rent row per purchase vehicle)
   //   Sales     -> Unload (the Unload page lists every sale)
   const [syncCheck, setSyncCheck] = useState(false);
+
+  // ---- live "will this merge?" note in the Add / Edit Purchase form
+  const formRef = useRef(null);
+  const [, setFormTick] = useState(0);
+  useEffect(() => {
+    if (modal) setFormTick((t) => t + 1); // show the note for the opening values
+  }, [modal, editing]);
+
+  function buildMergePreview() {
+    const form = formRef.current;
+    if (!modal || dataPage !== "Purchases" || !form) return null;
+
+    const f = Object.fromEntries(new FormData(form).entries());
+    const vehicle = normVehicle(f.vehicle_number);
+    if (!vehicle || !f.entry_date || !f.company_id) return { waiting: true };
+
+    const quantity = Number(f.quantity || 0);
+    const rate = Number(f.rate || 0);
+    const total = Number(f.purchase_total || 0) || quantity * rate;
+
+    const others = purchasesList.items.filter(
+      (p) =>
+        p.id !== editing?.id &&
+        normVehicle(p.vehicle_number) === vehicle &&
+        dayOf(p.entry_date) === f.entry_date &&
+        String(p.company_id) === String(f.company_id),
+    );
+
+    if (!others.length) return { merge: false };
+
+    const totalQty =
+      others.reduce((t, p) => t + Number(p.quantity || 0), 0) + quantity;
+    const totalAmount =
+      others.reduce((t, p) => t + Number(p.purchase_total || 0), 0) + total;
+
+    const voucher = normVehicle(f.voucher_no);
+
+    return {
+      merge: true,
+      others,
+      totalQty: Math.round(totalQty * 1000) / 1000,
+      average: totalQty > 0 ? totalAmount / totalQty : 0,
+      sameVoucher:
+        Boolean(voucher) &&
+        others.some((p) => normVehicle(p.voucher_no) === voucher),
+      sameRate: others.every((p) => Number(p.rate || 0) === rate),
+    };
+  }
   const tableCheck = useMemo(() => {
     const withVehicle = purchasesList.items.filter((p) =>
       normVehicle(p.vehicle_number),
@@ -1877,6 +2003,7 @@ export default function App() {
       if (tFrom) parts.push(`From ${tFrom}`);
       if (tTo) parts.push(`To ${tTo}`);
       if (tStatus) parts.push(`Status: ${tStatus}`);
+      if (tMismatch) parts.push("Only quantity mismatches");
       if (search) parts.push(`Search: ${search}`);
 
       const t = tracking.totals;
@@ -3254,6 +3381,26 @@ export default function App() {
           )}
 
           <div className="top-actions">
+            {page === TRACK && (
+              <button
+                type="button"
+                className={`icon-btn check-btn ${tMismatch ? "active" : ""}`}
+                aria-label="Quantity mismatch"
+                aria-pressed={tMismatch}
+                title={
+                  tracking.mismatch.count
+                    ? `Quantity mismatch: ${tracking.mismatch.count} load(s), net ${qty(Math.abs(tracking.mismatch.net))} qtl ${tracking.mismatch.net >= 0 ? "bought but not sold" : "sold more than bought"}. Click to ${tMismatch ? "show all" : "show only these"}.`
+                    : "No quantity mismatch - every sold load matches its purchase"
+                }
+                onClick={() => setTMismatch((v) => !v)}
+              >
+                <AlertTriangle size={18} />
+                {tracking.mismatch.count > 0 && (
+                  <span className="check-badge">{tracking.mismatch.count}</span>
+                )}
+              </button>
+            )}
+
             {isOwner &&
               !isViewer &&
               page !== "Dashboard" &&
@@ -3499,6 +3646,7 @@ export default function App() {
                         setTFrom("");
                         setTTo("");
                         setTStatus("");
+                        setTMismatch(false);
                         setSearch("");
                       }}
                     >
@@ -3671,6 +3819,18 @@ export default function App() {
                           </td>
                           <td>{r.s ? dayOf(r.s.entry_date) : "—"}</td>
                           <td className="num">
+                            {r.mismatch && (
+                              <span
+                                className="qty-mismatch"
+                                title={
+                                  r.diff > 0
+                                    ? `Purchase ${qty(r.p.quantity)} qtl, sold ${qty(r.soldQty)} qtl: ${qty(r.diff)} qtl less sold`
+                                    : `Purchase ${qty(r.p.quantity)} qtl, sold ${qty(r.soldQty)} qtl: ${qty(-r.diff)} qtl more sold`
+                                }
+                              >
+                                <AlertTriangle size={14} />
+                              </span>
+                            )}{" "}
                             {r.s ? qty(r.s.quantity) : "—"}
                           </td>
                           <td className="num">
@@ -5316,8 +5476,10 @@ export default function App() {
       {modal && !isViewer && (
         <div className="modal-backdrop" onClick={() => setModal(false)}>
           <form
+            ref={formRef}
             className="modal"
             onSubmit={save}
+            onChange={() => setFormTick((t) => t + 1)}
             onClick={(event) => event.stopPropagation()}
           >
             <div className="modal-head">
@@ -5406,6 +5568,60 @@ export default function App() {
                 </label>
               ))}
             </div>
+
+            {dataPage === "Purchases" &&
+              (() => {
+                const m = buildMergePreview();
+                if (!m || m.waiting) {
+                  return (
+                    <p className="merge-note muted">
+                      Enter company, date and vehicle number to see whether this
+                      purchase merges with another load.
+                    </p>
+                  );
+                }
+                if (!m.merge) {
+                  return (
+                    <div className="merge-note ok">
+                      <b>Not merged ✓</b> - no other purchase for this vehicle
+                      on this date. It stays a separate load with its own
+                      vehicle rent.
+                    </div>
+                  );
+                }
+                return (
+                  <div className="merge-note warn">
+                    <b>Will merge in Vehicle Tracking</b> with {m.others.length}{" "}
+                    other purchase
+                    {m.others.length === 1 ? "" : "s"} of this vehicle on this
+                    date:
+                    <ul>
+                      {m.others.map((p) => (
+                        <li key={p.id}>
+                          Voucher {p.voucher_no || "-"} · {qty(p.quantity)} qtl
+                          @ {money(p.rate)}
+                        </li>
+                      ))}
+                    </ul>
+                    Together: <b>{qty(m.totalQty)} qtl</b> at average{" "}
+                    <b>{money(m.average)}</b>
+                    <br />
+                    {m.sameVoucher ? (
+                      <span className="merge-bad">
+                        Same voucher number as an existing purchase - this may
+                        be a duplicate.
+                      </span>
+                    ) : (
+                      <span>Different voucher - OK, kept as its own bill.</span>
+                    )}{" "}
+                    {m.sameRate
+                      ? "Same rate."
+                      : "Different rate - the average rate is used."}
+                    <br />
+                    Vehicle Rent: one rent entry for the whole load.
+                  </div>
+                );
+              })()}
 
             {dataPage === "Rents" && (
               <datalist id="account-names">

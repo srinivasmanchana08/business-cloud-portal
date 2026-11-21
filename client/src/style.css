@@ -2588,3 +2588,47 @@ tbody tr:hover {
   line-height: 16px;
   text-align: center;
 }
+
+/* merge note in the purchase form */
+.merge-note {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  background: #f3f9fd;
+  border: 1px solid #dbe9f4;
+}
+
+.merge-note.ok {
+  background: #effaf3;
+  border-color: #cfe9d8;
+}
+
+.merge-note.warn {
+  background: #fff8e6;
+  border-color: #f1dfaa;
+}
+
+.merge-note ul {
+  margin: 4px 0 6px 18px;
+  padding: 0;
+}
+
+.merge-bad {
+  color: #c0392b;
+  font-weight: 600;
+}
+
+/* quantity mismatch marker */
+.qty-mismatch {
+  display: inline-flex;
+  vertical-align: middle;
+  color: #d98a00;
+  cursor: help;
+}
+
+.icon-btn.active {
+  background: #fff3d6;
+  color: #b36b00;
+}
