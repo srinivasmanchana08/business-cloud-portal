@@ -348,20 +348,50 @@ async function sumColumn(db, table, column, business, direction) {
   }
 }
 
+// Totals computed by the database function dashboard_totals (see
+// supabase-speedup.sql). Returns null when the function is not installed yet.
+let totalsFunctionMissing = false;
+
+async function totalsFromDatabase(db, business) {
+  if (totalsFunctionMissing) return null;
+
+  const { data, error } = await db
+    .rpc("dashboard_totals", { p_business: business || null })
+    .single();
+
+  if (error) {
+    // not installed: use the slower row-by-row sums and stop asking
+    if (error.code === "PGRST202" || error.code === "42883") {
+      totalsFunctionMissing = true;
+      console.warn("dashboard_totals() not found - run supabase-speedup.sql");
+      return null;
+    }
+    throw error;
+  }
+
+  return data;
+}
+
 // Dashboard totals for one business ("" = all). Owner and view-only accounts
 // also get the payment figures.
 async function dashboardTotals(req, business) {
   const db = req.supabase;
   const withPayments = isOwner(req) || isViewer(req);
 
-  const [purchases, sales, collected, disbursed] = await Promise.all([
-    sumColumn(db, "purchases", "purchase_total", business),
-    sumColumn(db, "sales", "gross_total", business),
-    withPayments
-      ? sumColumn(db, "payments", "amount", business, "received")
-      : 0,
-    withPayments ? sumColumn(db, "payments", "amount", business, "paid") : 0,
-  ]);
+  const fast = await totalsFromDatabase(db, business);
+
+  const [purchases, sales, collected, disbursed] = fast
+    ? [fast.purchases, fast.sales, fast.collected, fast.disbursed].map(Number)
+    : await Promise.all([
+        sumColumn(db, "purchases", "purchase_total", business),
+        sumColumn(db, "sales", "gross_total", business),
+        withPayments
+          ? sumColumn(db, "payments", "amount", business, "received")
+          : 0,
+        withPayments
+          ? sumColumn(db, "payments", "amount", business, "paid")
+          : 0,
+      ]);
 
   if (!withPayments) return { sales, purchases };
 
