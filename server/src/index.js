@@ -2,7 +2,11 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import { promisify } from "node:util";
+import { gzip } from "node:zlib";
 import { createClient } from "@supabase/supabase-js";
+
+const gzipAsync = promisify(gzip);
 
 const app = express();
 
@@ -45,6 +49,7 @@ app.use(
     },
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
+    maxAge: 86400, // browser may cache the preflight answer
   }),
 );
 
@@ -73,57 +78,93 @@ app.get("/health", (_req, res) => {
 // 4. AUTHENTICATION MIDDLEWARE
 // ==========================================
 
+// A token is verified with Supabase once and then remembered for a short time,
+// so a burst of requests (or a page full of lists) costs one verification, not
+// one per request. The cache never outlives the token itself.
+const SESSION_TTL_MS = 60 * 1000;
+const SESSION_MAX = 200;
+const sessions = new Map(); // token -> { promise, expires }
+
+function tokenExpiry(token) {
+  try {
+    const { exp } = JSON.parse(
+      Buffer.from(token.split(".")[1], "base64url").toString(),
+    );
+    return exp ? exp * 1000 : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function authenticate(token) {
+  const now = Date.now();
+  const hit = sessions.get(token);
+  if (hit && hit.expires > now) return hit.promise;
+
+  // The user's own client: RLS in the database enforces what they may see.
+  const client = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_ANON_KEY,
+    {
+      global: { headers: { Authorization: `Bearer ${token}` } },
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+        detectSessionInUrl: false,
+      },
+    },
+  );
+
+  const promise = client.auth
+    .getUser(token)
+    .then(({ data, error }) =>
+      error || !data?.user ? null : { user: data.user, client },
+    );
+
+  const exp = tokenExpiry(token);
+  sessions.set(token, {
+    promise,
+    expires: Math.min(now + SESSION_TTL_MS, exp || Infinity),
+  });
+  if (sessions.size > SESSION_MAX)
+    sessions.delete(sessions.keys().next().value);
+
+  // never keep a failed check
+  promise.then(
+    (result) => !result && sessions.delete(token),
+    () => sessions.delete(token),
+  );
+
+  return promise;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, { expires }] of sessions) {
+    if (expires <= now) sessions.delete(token);
+  }
+}, SESSION_TTL_MS).unref();
+
 async function requireAuth(req, res, next) {
   try {
     const token = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
 
     if (!token) {
-      return res.status(401).json({
-        error: "Sign in required",
-      });
+      return res.status(401).json({ error: "Sign in required" });
     }
 
-    // Create a Supabase client using the user's JWT.
-    // RLS will enforce database access permissions.
+    const session = await authenticate(token);
 
-    const userSupabase = createClient(
-      process.env.SUPABASE_URL,
-      process.env.SUPABASE_ANON_KEY,
-      {
-        global: {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        },
-        auth: {
-          autoRefreshToken: false,
-          persistSession: false,
-          detectSessionInUrl: false,
-        },
-      },
-    );
-
-    const {
-      data: { user },
-      error,
-    } = await userSupabase.auth.getUser(token);
-
-    if (error || !user) {
-      return res.status(401).json({
-        error: "Invalid or expired session",
-      });
+    if (!session) {
+      return res.status(401).json({ error: "Invalid or expired session" });
     }
 
-    req.user = user;
-    req.supabase = userSupabase;
-
+    req.user = session.user;
+    req.supabase = session.client;
     next();
   } catch (error) {
     console.error("Authentication error:", error.message);
-
-    return res.status(500).json({
-      error: "Authentication service error",
-    });
+    return res.status(500).json({ error: "Authentication service error" });
   }
 }
 
@@ -258,6 +299,84 @@ const resources = {
 };
 
 // ==========================================
+// 5b. SHARED QUERY HELPERS
+// ==========================================
+
+const unknownBusiness = (business) =>
+  Boolean(business) && !BUSINESSES.includes(business);
+
+// the newest 500 rows of a resource (optionally one business / name search)
+function listQuery(db, key, { business, search } = {}) {
+  const { table, scoped } = resources[key];
+
+  let query = db
+    .from(table)
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(500);
+
+  if (scoped && business) query = query.eq("business", business);
+
+  if (key === "companies" && search) {
+    query = query.ilike("name", `%${String(search).slice(0, 100)}%`);
+  }
+
+  return query;
+}
+
+// A sum can span more than the 1000 rows Supabase returns per request,
+// so read it page by page.
+async function sumColumn(db, table, column, business, direction) {
+  const PAGE = 1000;
+  let total = 0;
+
+  for (let from = 0; ; from += PAGE) {
+    let query = db
+      .from(table)
+      .select(column)
+      .order("id")
+      .range(from, from + PAGE - 1);
+
+    if (business) query = query.eq("business", business);
+    if (direction) query = query.eq("direction", direction);
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    for (const row of data) total += Number(row[column] || 0);
+    if (data.length < PAGE) return total;
+  }
+}
+
+// Dashboard totals for one business ("" = all). Owner and view-only accounts
+// also get the payment figures.
+async function dashboardTotals(req, business) {
+  const db = req.supabase;
+  const withPayments = isOwner(req) || isViewer(req);
+
+  const [purchases, sales, collected, disbursed] = await Promise.all([
+    sumColumn(db, "purchases", "purchase_total", business),
+    sumColumn(db, "sales", "gross_total", business),
+    withPayments
+      ? sumColumn(db, "payments", "amount", business, "received")
+      : 0,
+    withPayments ? sumColumn(db, "payments", "amount", business, "paid") : 0,
+  ]);
+
+  if (!withPayments) return { sales, purchases };
+
+  return {
+    sales,
+    purchases,
+    collected,
+    disbursed,
+    receivable: sales - collected,
+    payable: purchases - disbursed,
+    net: collected - disbursed,
+  };
+}
+
+// ==========================================
 // 6. HELPER: FILTER ALLOWED FIELDS
 // ==========================================
 
@@ -292,28 +411,16 @@ for (const [key, config] of Object.entries(resources)) {
   // GET RECORDS
   app.get(`/api/${key}`, async (req, res) => {
     try {
-      let query = req.supabase
-        .from(table)
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(500);
+      const { business, search } = req.query;
 
-      // purchases / sales / payments / rents belong to one business
-      if (config.scoped && req.query.business) {
-        if (!BUSINESSES.includes(req.query.business)) {
-          return res.status(400).json({ error: "Unknown business" });
-        }
-        query = query.eq("business", req.query.business);
+      if (config.scoped && unknownBusiness(business)) {
+        return res.status(400).json({ error: "Unknown business" });
       }
 
-      if (key === "companies" && req.query.search) {
-        query = query.ilike(
-          "name",
-          `%${String(req.query.search).slice(0, 100)}%`,
-        );
-      }
-
-      const { data, error } = await query;
+      const { data, error } = await listQuery(req.supabase, key, {
+        business,
+        search,
+      });
 
       if (error) {
         console.error(`GET ${key}:`, error.message);
@@ -435,82 +542,104 @@ for (const [key, config] of Object.entries(resources)) {
 }
 
 // ==========================================
-// 8. DASHBOARD API
+// 8. DASHBOARD + BOOTSTRAP API
 // ==========================================
 
 app.get("/api/dashboard", async (req, res) => {
   try {
-    const db = req.supabase;
+    const { business } = req.query;
 
-    // optional ?business= limits the totals to one business
-    const business = req.query.business;
-
-    if (business && !BUSINESSES.includes(business)) {
+    if (unknownBusiness(business)) {
       return res.status(400).json({ error: "Unknown business" });
     }
 
-    const scope = (query) =>
-      business ? query.eq("business", business) : query;
-    // owner and view-only accounts see the payment figures
-    const owner = isOwner(req) || isViewer(req);
-
-    const [p, s, received, paid] = await Promise.all([
-      scope(db.from("purchases").select("purchase_total")),
-
-      scope(db.from("sales").select("gross_total")),
-
-      owner
-        ? scope(
-            db.from("payments").select("amount").eq("direction", "received"),
-          )
-        : Promise.resolve({ data: [], error: null }),
-
-      owner
-        ? scope(db.from("payments").select("amount").eq("direction", "paid"))
-        : Promise.resolve({ data: [], error: null }),
-    ]);
-
-    const errors = [p.error, s.error, received.error, paid.error].filter(
-      Boolean,
-    );
-
-    if (errors.length) {
-      console.error("Dashboard error:", errors[0].message);
-
-      return res.status(400).json({
-        error: errors[0].message,
-      });
-    }
-
-    const sum = (rows, key) =>
-      (rows || []).reduce((total, row) => total + Number(row[key] || 0), 0);
-
-    const sales = sum(s.data, "gross_total");
-    const purchases = sum(p.data, "purchase_total");
-
-    const collected = sum(received.data, "amount");
-    const disbursed = sum(paid.data, "amount");
-
-    // other users get sales and purchases only
-    if (!owner) {
-      return res.json({ sales, purchases });
-    }
-
-    return res.json({
-      sales,
-      purchases,
-      collected,
-      disbursed,
-      receivable: sales - collected,
-      payable: purchases - disbursed,
-      net: collected - disbursed,
-    });
+    return res.json(await dashboardTotals(req, business));
   } catch (error) {
     console.error("Dashboard error:", error.message);
+    return res.status(500).json({ error: "Failed to load dashboard" });
+  }
+});
 
-    return res.status(500).json({
-      error: "Failed to load dashboard",
-    });
+// Everything the app needs right after sign-in, in ONE request (and gzipped):
+// companies, every list of every business, and the dashboard totals.
+// Lists an account may not read are simply left out.
+const BOOT_LISTS = ["purchases", "sales", "payments", "rents", "orders"];
+
+const canReadList = (req, key) => {
+  const { ownerOnly, viewerCanRead } = resources[key];
+  return !ownerOnly || isOwner(req) || (viewerCanRead && isViewer(req));
+};
+
+const addTotals = (a, b) =>
+  Object.fromEntries(Object.keys(a).map((k) => [k, a[k] + (b[k] || 0)]));
+
+app.get("/api/bootstrap", async (req, res) => {
+  const started = Date.now();
+
+  try {
+    const db = req.supabase;
+    const keys = BOOT_LISTS.filter((key) => canReadList(req, key));
+
+    const [companies, perBusiness] = await Promise.all([
+      listQuery(db, "companies"),
+      Promise.all(
+        BUSINESSES.map(async (business) => {
+          const [stats, ...lists] = await Promise.all([
+            dashboardTotals(req, business),
+            ...keys.map((key) => listQuery(db, key, { business })),
+          ]);
+
+          const failed = lists.find((l) => l.error);
+          if (failed) throw failed.error;
+
+          return {
+            business,
+            stats,
+            lists: Object.fromEntries(keys.map((k, i) => [k, lists[i].data])),
+          };
+        }),
+      ),
+    ]);
+
+    if (companies.error) throw companies.error;
+
+    const payload = {
+      companies: companies.data,
+      stats: {
+        "": perBusiness.map((b) => b.stats).reduce(addTotals),
+        ...Object.fromEntries(perBusiness.map((b) => [b.business, b.stats])),
+      },
+      data: Object.fromEntries(perBusiness.map((b) => [b.business, b.lists])),
+    };
+
+    const queried = Date.now();
+    const json = JSON.stringify(payload);
+    res.set("Vary", "Accept-Encoding");
+
+    let body = json;
+    if (/\bgzip\b/.test(req.headers["accept-encoding"] || "")) {
+      // level 1: much less CPU on a small server, still ~85% smaller
+      body = await gzipAsync(json, { level: 1 });
+      res.set({
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Encoding": "gzip",
+      });
+    } else {
+      res.type("json");
+    }
+
+    // shows up in the browser's Network > Timing tab and in the Render logs
+    const done = Date.now();
+    const timing = `db;dur=${queried - started}, pack;dur=${done - queried}`;
+    res.set("Server-Timing", timing);
+    console.log(
+      `bootstrap: ${timing}, ${(json.length / 1024).toFixed(0)} KB -> ${(body.length / 1024).toFixed(0)} KB sent`,
+    );
+
+    return res.send(body);
+  } catch (error) {
+    console.error("Bootstrap error:", error.message);
+    return res.status(500).json({ error: "Failed to load data" });
   }
 });
 

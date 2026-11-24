@@ -8,6 +8,7 @@ import React, {
 import { createClient } from "@supabase/supabase-js";
 import { useDispatch, useSelector } from "react-redux";
 import {
+  bootstrap,
   fetchStats,
   fetchList,
   saveRecord,
@@ -34,13 +35,10 @@ import {
   Edit3,
   ArrowUp,
   ArrowUpDown,
-  Scale,
   AlertTriangle,
-  Truck,
   Banknote,
   ClipboardList,
   ListChecks,
-  BookOpen,
   Folder,
   FolderOpen,
   ChevronDown,
@@ -575,7 +573,6 @@ export default function App() {
 
   // ---- Redux (cached data, filters, sort)
   const dispatch = useDispatch();
-  const stats = useSelector((s) => s.data.stats);
   const storeError = useSelector((s) => s.data.error);
   const companies = useSelector((s) => s.data.lists.Companies.items);
   const list = useSelector((s) => s.data.lists[page]);
@@ -1003,9 +1000,9 @@ export default function App() {
     [session, page, biz, api, dispatch, isOwner, isViewer],
   );
 
-  // ---- first load after sign-in: fetch everything before showing the app
+  // ---- first load after sign-in: ONE request brings every list + totals.
+  // If it fails, the open page simply loads its own data (see refresh below).
   const [bootedFor, setBootedFor] = useState(null);
-  const [bootProgress, setBootProgress] = useState({ done: 0, total: 1 });
   const [bootSlow, setBootSlow] = useState(false);
   const booting = Boolean(userId) && bootedFor !== userId;
 
@@ -1016,35 +1013,10 @@ export default function App() {
     }
 
     let active = true;
-
-    const jobs = [
-      fetchStats({ api, force: true, business: "" }), // dashboard (all)
-      fetchList({ api, page: "Companies", force: true }),
-    ];
-
-    folders.forEach((f) =>
-      allowedLists([
-        "Purchases",
-        "Sales",
-        "Payments",
-        "Rents",
-        "Orders",
-      ]).forEach((p) =>
-        jobs.push(fetchList({ api, page: p, force: true, business: f.name })),
-      ),
-    );
-
-    setBootProgress({ done: 0, total: jobs.length });
     setBootSlow(false);
-    const slowTimer = setTimeout(() => active && setBootSlow(true), 8000);
+    const slowTimer = setTimeout(() => active && setBootSlow(true), 6000);
 
-    Promise.all(
-      jobs.map((job) =>
-        dispatch(job).then(() => {
-          if (active) setBootProgress((p) => ({ ...p, done: p.done + 1 }));
-        }),
-      ),
-    ).then(() => {
+    dispatch(bootstrap({ api })).then(() => {
       if (active) setBootedFor(userId);
     });
 
@@ -1055,6 +1027,11 @@ export default function App() {
     // runs once per signed-in user (not on token refresh)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
+
+  // wake the (free-tier) server while the login screen is still showing
+  useEffect(() => {
+    if (API) fetch(`${API}/health`, { cache: "no-store" }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (
@@ -1069,12 +1046,13 @@ export default function App() {
   }, [session, isOwner, isViewer, page, dispatch]);
 
   useEffect(() => {
-    if (session) {
-      refresh(false);
-    } else {
+    if (!session) {
       dispatch(clearData());
+    } else if (!booting) {
+      // (while booting, the single bootstrap request is already loading it all)
+      refresh(false);
     }
-  }, [session, page, refresh, dispatch]);
+  }, [session, booting, page, refresh, dispatch]);
 
   // ===================================================
   // 10. FILTER + SORT
@@ -1992,8 +1970,6 @@ export default function App() {
   function buildExport(which) {
     const day = (v) => (v ? dayOf(v) : "");
     const name = (id) => companyMap[id] || "";
-    const sumOf = (list, fn) =>
-      list.reduce((t, r) => t + Number(fn(r) || 0), 0);
 
     // ---- Vehicle tracking
     if (page === TRACK) {
@@ -3122,10 +3098,6 @@ export default function App() {
   // ===================================================
 
   if (booting) {
-    const pct = Math.round(
-      (bootProgress.done / Math.max(bootProgress.total, 1)) * 100,
-    );
-
     return (
       <main className="login-wrap">
         <div className="login-card boot-card" role="status" aria-live="polite">
@@ -3141,14 +3113,8 @@ export default function App() {
               : "Getting companies, purchases, sales, payments and rent ready."}
           </p>
 
-          <div
-            className="boot-bar"
-            role="progressbar"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={pct}
-          >
-            <span style={{ width: `${pct}%` }} />
+          <div className="boot-bar" role="progressbar" aria-busy="true">
+            <span className="boot-sweep" />
           </div>
         </div>
       </main>

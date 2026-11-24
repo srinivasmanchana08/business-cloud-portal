@@ -88,31 +88,6 @@
     @apply shadow-[inset_3px_0_#6689ff];
   }
 
-  .sidebar-bottom {
-    @apply mt-auto;
-  }
-
-  .user-chip {
-    @apply flex gap-2.5 items-center py-[15px] px-2 border-t border-t-[#2a3850] mb-2 min-w-0;
-  }
-
-  .avatar {
-    @apply w-[32px] h-[32px] rounded-full bg-[#334c75] grid place-items-center text-white;
-  }
-
-  .user-chip b,
-  .user-chip small {
-    @apply block max-w-[175px] overflow-hidden text-ellipsis;
-  }
-
-  .user-chip b {
-    @apply text-[12px] text-white;
-  }
-
-  .user-chip small {
-    @apply text-[10px] text-[#92a1b8];
-  }
-
   .main {
     @apply ml-64.5;
   }
@@ -129,10 +104,6 @@
     @apply text-[#8792a5];
   }
 
-  .live-dot {
-    @apply text-[11px] text-[#16885e];
-  }
-
   .icon-btn {
     @apply border-0 bg-transparent text-[#68758b] p-2 rounded-[8px];
   }
@@ -147,23 +118,6 @@
 
   .content {
     @apply p-2.5 max-w-[1500px] m-auto;
-  }
-
-  .page-heading {
-    @apply flex justify-between items-center mb-7;
-  }
-
-  .page-heading h1 {
-    font: 800 29px Manrope;
-    @apply my-[7px] mx-0;
-  }
-
-  .page-heading p {
-    @apply text-[13px] m-0;
-  }
-
-  .page-heading .eyebrow {
-    @apply text-[10px];
   }
 
   .primary,
@@ -183,39 +137,12 @@
     @apply bg-[#edf0f6] text-[#44516a];
   }
 
-  .stat-grid {
-    @apply grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    @apply gap-4 mb-5;
-  }
-
-  .stat-card,
   .panel {
     @apply bg-white border border-[#e9edf4] rounded-[13px] shadow-[0_3px_12px_#192b4808];
   }
 
-  .stat-card {
-    @apply p-5 relative min-h-[125px];
-  }
 
-  .stat-card>span,
-  .stat-card small {
-    @apply block text-[#8490a3] text-[12px];
-  }
 
-  .stat-card strong {
-    @apply block;
-    font: 800 23px Manrope;
-    @apply mt-3 mx-0 mb-1.5;
-  }
-
-  .stat-icon {
-    @apply absolute right-[18px] top-[18px] p-[9px] rounded-[9px];
-  }
-
-  .blue {
-    @apply bg-[#e9efff] text-[#5275e9];
-  }
 
   .violet {
     @apply bg-[#f0eaff] text-[#865edb];
@@ -237,7 +164,6 @@
     @apply p-5.5 mb-4.5;
   }
 
-  .panel-head,
   .table-toolbar {
     @apply flex justify-between items-center gap-4;
   }
@@ -251,11 +177,6 @@
   .panel p,
   .table-toolbar p {
     @apply text-[11px] m-0;
-  }
-
-  .net-value {
-    font: 800 29px Manrope;
-    @apply mt-4.5;
   }
 
   .table-toolbar {
@@ -415,40 +336,11 @@
     .topbar {
       @apply py-0 px-4.5;
     }
-
-    .stat-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
   }
 
   @media(max-width:560px) {
-    .stat-grid {
-      @apply grid-cols-[1fr_1fr] gap-[9px];
-    }
 
-    .stat-card {
-      @apply p-3.5 min-h-[112px];
-    }
 
-    .stat-card strong {
-      @apply text-[17px];
-    }
-
-    .stat-card>span {
-      @apply text-[10px];
-    }
-
-    .page-heading {
-      @apply items-start gap-3;
-    }
-
-    .page-heading h1 {
-      @apply text-[24px];
-    }
-
-    .page-heading .primary {
-      @apply p-2.5 text-[10px];
-    }
 
     .form-grid {
       @apply grid-cols-[1fr];
@@ -469,10 +361,6 @@
 
     .topbar {
       @apply text-[11px];
-    }
-
-    .live-dot {
-      font-size: 0;
     }
 
     .login-card {
@@ -956,20 +844,6 @@
 
 /* ---------- signed-in email in the top bar ---------- */
 
-.top-email {
-  max-width: 210px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12.5px;
-  color: #5a667d;
-}
-
-@media (max-width: 1100px) {
-  .top-email {
-    display: none;
-  }
-}
 
 /* ---------- compact totals bar on every page (more room for the table) ---------- */
 
@@ -1104,23 +978,8 @@
   transition: margin-left 0.2s ease;
 }
 
-.app-shell.sidebar-closed .sidebar {
-  transform: translateX(-100%);
-  visibility: hidden;
-  transition: transform 0.2s ease, visibility 0s 0.2s;
-}
 
-.app-shell.sidebar-closed .main {
-  margin-left: 0;
-}
 
-@media (max-width: 900px) {
-  .app-shell.sidebar-closed .sidebar.open {
-    transform: translateX(0);
-    visibility: visible;
-    transition: transform 0.2s ease, visibility 0s;
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
 
@@ -1654,23 +1513,6 @@ body {
   color: var(--muted);
 }
 
-.user-chip {
-  border-top-color: var(--line);
-}
-
-.avatar {
-  background: var(--sky-soft);
-  color: var(--navy);
-}
-
-.user-chip b {
-  color: var(--ink);
-}
-
-.user-chip small {
-  color: var(--muted);
-}
-
 /* ---------- top bar + tab strip ---------- */
 
 .topbar {
@@ -1690,10 +1532,6 @@ body {
 .icon-btn:hover {
   background: #eaf4fb;
   color: var(--navy);
-}
-
-.top-email {
-  color: #5d7088;
 }
 
 .searchbox {
@@ -1738,7 +1576,6 @@ body {
 
 /* ---------- cards, panels ---------- */
 
-.stat-card,
 .panel {
   border: 0;
   border-radius: 18px;
@@ -1990,13 +1827,6 @@ tbody tr:hover {
   background: #eaf0f6;
 }
 
-.stat-icon.blue,
-.stat-icon.violet,
-.stat-icon.green,
-.stat-icon.amber {
-  background: var(--sky-soft);
-  color: var(--sky-dark);
-}
 
 /* =====================================================
    LAYOUT: slim icon rail + top bar like the reference
@@ -2631,4 +2461,29 @@ tbody tr:hover {
 .icon-btn.active {
   background: #fff3d6;
   color: #b36b00;
+}
+
+/* ---------- loading screen: sweeping bar (one request, no % to show) ---------- */
+
+.boot-bar .boot-sweep {
+  width: 40%;
+  animation: boot-sweep 1.1s ease-in-out infinite;
+}
+
+@keyframes boot-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boot-bar .boot-sweep {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
 }

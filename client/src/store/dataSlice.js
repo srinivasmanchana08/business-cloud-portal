@@ -59,7 +59,6 @@ const makeInitialState = () => ({
   statsLoading: false,
   lists: Object.fromEntries(LIST_PAGES.map((p) => [p, blankList()])),
   filters: Object.fromEntries(FILTER_PAGES.map((p) => [p, blankFilters()])),
-  sortDir: Object.fromEntries(FILTER_PAGES.map((p) => [p, "desc"])), // newest first
   error: "",
 });
 
@@ -86,6 +85,12 @@ const peek = (data, page, business) => {
 // `api` is the authenticated fetch helper from App.jsx.
 // `force: true` skips the freshness check.
 // =====================================================
+
+// One request right after sign-in: companies, every list of every business
+// and the dashboard totals (see GET /api/bootstrap on the server).
+export const bootstrap = createAsyncThunk("data/bootstrap", ({ api }) =>
+  api("bootstrap"),
+);
 
 export const fetchStats = createAsyncThunk(
   "data/fetchStats",
@@ -193,10 +198,6 @@ const dataSlice = createSlice({
       state.filters[page] = blankFilters();
     },
 
-    toggleSort(state, { payload: page }) {
-      state.sortDir[page] = state.sortDir[page] === "desc" ? "asc" : "desc";
-    },
-
     // Switching business (sidebar folder): park the current business's data in
     // the cache and bring the other one back. Companies are shared and stay.
     setBusiness(state, { payload }) {
@@ -238,6 +239,33 @@ const dataSlice = createSlice({
 
   extraReducers: (builder) => {
     builder
+      // ---- first load: fill the whole cache at once
+      .addCase(bootstrap.fulfilled, (state, { payload }) => {
+        const now = Date.now();
+        const fill = (list, items) => {
+          list.items = items;
+          list.loaded = true;
+          list.loading = false;
+          list.fetchedAt = now;
+        };
+
+        fill(state.lists.Companies, payload.companies);
+
+        Object.entries(payload.stats).forEach(([business, stats]) => {
+          const h = holder(state, undefined, business);
+          h.stats = stats;
+          h.statsAt = now;
+          h.statsLoading = false;
+        });
+
+        Object.entries(payload.data).forEach(([business, lists]) => {
+          Object.entries(lists).forEach(([key, items]) => {
+            const page = key[0].toUpperCase() + key.slice(1); // "sales" -> "Sales"
+            fill(holder(state, page, business).lists[page], items);
+          });
+        });
+      })
+
       // ---- dashboard stats
       .addCase(fetchStats.pending, (state, action) => {
         holder(state, undefined, action.meta.arg.business).statsLoading = true;
@@ -300,13 +328,7 @@ const dataSlice = createSlice({
   },
 });
 
-export const {
-  setFilter,
-  clearFilters,
-  toggleSort,
-  setBusiness,
-  clearError,
-  clearData,
-} = dataSlice.actions;
+export const { setFilter, clearFilters, setBusiness, clearError, clearData } =
+  dataSlice.actions;
 
 export default dataSlice.reducer;
