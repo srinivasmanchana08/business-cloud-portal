@@ -155,7 +155,13 @@ function readView() {
       return { page: v.page, biz: "" };
 
     const folder = folders.find((f) => f.name === v.biz);
-    const tabPages = ["Ledger", "Dues", "Unloads", "Vehicle Tracking"]; // opened from the tab strip
+    const tabPages = [
+      "Ledger",
+      "Dues",
+      "Unloads",
+      "Vehicle Tracking",
+      "Vehicle Details",
+    ]; // opened from the tab strip
     if (
       folder &&
       (folder.items.some(([n]) => n === v.page) || tabPages.includes(v.page))
@@ -217,6 +223,27 @@ const TRACK = "Vehicle Tracking";
 const RENT = "Vehicle Rent";
 const DUES = "Dues";
 const UNLOAD = "Unloads";
+const TRIPS = "Vehicle Details";
+
+// Vehicle Details columns: [label, sort key, kind, right-aligned, who sees it]
+const TRIP_COLS = [
+  ["Vehicle", "vehicle", "text", false, null],
+  ["Purchase date", "pdate", "date", false, null],
+  ["Purchase name", "pco", "text", false, null],
+  ["Rate", "prate", "num", true, null],
+  ["Qty (qtl)", "pqty", "num", true, null],
+  ["Purchase total", "ptotal", "num", true, null],
+  ["Rent", "rent", "num", true, "owner"],
+  ["Sale date", "sdate", "date", false, null],
+  ["Sale name", "sco", "text", false, null],
+  ["Sale total", "stotal", "num", true, null],
+  ["Unload date", "udate", "date", false, null],
+  ["Unload qty (qtl)", "uqty", "num", true, null],
+  ["Payment received date", "paydate", "date", false, "finance"],
+  ["Days", "days", "num", true, "finance"],
+  ["Payment total", "paytotal", "num", true, "finance"],
+  ["Margin", "margin", "num", true, "owner"],
+];
 
 // singular names used on the "Add ..." button and the modal title
 const RECORD_LABEL = {
@@ -395,6 +422,8 @@ function allocatePayments(bills, payments) {
       out[bill.id] = {
         received: bill.total > 0 && need <= TOL ? last : "",
         balance: Math.max(need, 0),
+        paid: Math.max(bill.total - Math.max(need, 0), 0), // amount settled so far
+        last, // date of the latest payment used ("" = none)
       };
     });
 
@@ -563,7 +592,7 @@ export default function App() {
 
   // the Vehicle Tracking page adds Purchase records
   const dataPage =
-    page === TRACK
+    page === TRACK || page === TRIPS
       ? "Purchases"
       : page === RENT
         ? "Rents"
@@ -618,7 +647,12 @@ export default function App() {
     const sales = {};
 
     salesList.items.forEach((x) => {
-      const a = salesAlloc[x.id] || { received: "", balance: 0 };
+      const a = salesAlloc[x.id] || {
+        received: "",
+        balance: 0,
+        paid: 0,
+        last: "",
+      };
 
       // days only count once the vehicle is unloaded (unload quantity > 0)
       const unloaded = Number(x.unload_quantity || 0) > 0;
@@ -627,6 +661,8 @@ export default function App() {
       sales[x.id] = {
         received: a.received,
         balance: a.balance,
+        paid: a.paid || 0,
+        last: a.last || "",
         pending: !a.received,
         days: start ? Math.max(0, daysBetween(start, a.received || now)) : null,
       };
@@ -765,6 +801,14 @@ export default function App() {
   const [tMismatch, setTMismatch] = useState(false); // only rows with a qty difference
   const [tSort, setTSort] = useState({ key: "pdate", dir: "asc" });
 
+  // Vehicle Details filters
+  const [vPCompany, setVPCompany] = useState("");
+  const [vSCompany, setVSCompany] = useState("");
+  const [vFrom, setVFrom] = useState("");
+  const [vTo, setVTo] = useState("");
+  const [vPay, setVPay] = useState(""); // "" | "Paid" | "Part" | "Pending"
+  const [vSort, setVSort] = useState({ key: "pdate", dir: "asc" });
+
   // Vehicle Rent filters
   const [rCompany, setRCompany] = useState("");
   const [rAccount, setRAccount] = useState("");
@@ -802,6 +846,7 @@ export default function App() {
   const dataSort = dataSorts[page] || DEFAULT_SORT[page] || NO_SORT;
 
   const sortT = (k, d) => setTSort((c) => nextSort(c, k, d));
+  const sortV = (k, d) => setVSort((c) => nextSort(c, k, d));
   const sortR = (k, d) => setRSort((c) => nextSort(c, k, d));
   const sortS = (k, d) => setSSort((c) => nextSort(c, k, d));
   const sortData = (k, d) =>
@@ -965,7 +1010,7 @@ export default function App() {
       dispatch(fetchStats({ api, force, business: biz }));
       dispatch(fetchList({ api, page: "Companies", force }));
 
-      if (page === TRACK) {
+      if (page === TRACK || page === TRIPS) {
         // rent is needed here to deduct it from the margin
         allowedLists(["Purchases", "Sales", "Payments", "Rents"]).forEach((p) =>
           dispatch(fetchList({ api, page: p, force, business: biz })),
@@ -1502,6 +1547,226 @@ export default function App() {
 
   const trackFiltered = Boolean(
     tPCompany || tSCompany || tFrom || tTo || tStatus || tMismatch || search,
+  );
+
+  // ===================================================
+  // 10c-1. VEHICLE DETAILS (one line per vehicle trip: purchase, rent,
+  //        sale, unload and payment received)
+  // ===================================================
+
+  const tripsView = useMemo(() => {
+    const { rentByPurchase } = matchRents(rentsList.items, purchasesList.items);
+    const round3 = (n) => Math.round(n * 1000) / 1000;
+
+    // same vehicle + same date + same company = ONE load (billed in parts)
+    const loads = new Map();
+    purchasesList.items.forEach((p) => {
+      const vehicle = normVehicle(p.vehicle_number);
+      const key = vehicle
+        ? `${vehicle}|${dayOf(p.entry_date)}|${p.company_id}`
+        : `single-${p.id}`;
+      if (!loads.has(key)) loads.set(key, []);
+      loads.get(key).push(p);
+    });
+
+    const purchases = [...loads.values()].map((list) => {
+      const first = list[0];
+      const quantity = round3(
+        list.reduce((t, p) => t + Number(p.quantity || 0), 0),
+      );
+      const purchase_total = list.reduce(
+        (t, p) => t + Number(p.purchase_total || 0),
+        0,
+      );
+
+      return {
+        ...first,
+        quantity,
+        purchase_total,
+        rate:
+          list.length > 1 && quantity > 0
+            ? purchase_total / quantity
+            : first.rate,
+        _vouchers: list.map((p) => p.voucher_no),
+        _rent: list.reduce((t, p) => t + (rentByPurchase[p.id] || 0), 0),
+        _sales: [],
+      };
+    });
+
+    const byVoucher = {};
+    const byVehicle = {};
+    purchases.forEach((p) => {
+      p._vouchers.forEach((voucher) => {
+        const v = normVehicle(voucher);
+        if (v) byVoucher[v] = p;
+      });
+      const k = normVehicle(p.vehicle_number);
+      if (k) (byVehicle[k] = byVehicle[k] || []).push(p);
+    });
+
+    const orphans = [];
+    [...salesList.items]
+      .sort((a, b) => dayOf(a.entry_date).localeCompare(dayOf(b.entry_date)))
+      .forEach((s) => {
+        let match = byVoucher[normVehicle(s.purchase_reference)];
+        if (!match) {
+          const candidates = (byVehicle[normVehicle(s.vehicle_number)] || [])
+            .filter((p) => dayOf(p.entry_date) <= dayOf(s.entry_date))
+            .sort((a, b) =>
+              dayOf(b.entry_date).localeCompare(dayOf(a.entry_date)),
+            );
+          match = candidates.find((p) => !p._sales.length) || candidates[0];
+        }
+        if (match) match._sales.push(s);
+        else orphans.push(s);
+      });
+
+    const all = [];
+    purchases.forEach((p) => {
+      if (!p._sales.length) all.push({ key: `p-${p.id}`, p, s: null });
+      else
+        p._sales.forEach((s) => all.push({ key: `p-${p.id}-${s.id}`, p, s }));
+    });
+    orphans.forEach((s) => all.push({ key: `s-${s.id}`, p: null, s }));
+
+    // payment received: date + amount settled against this sale
+    const withPay = all.map((r) => {
+      const a = r.s ? alloc.sales[r.s.id] : null;
+      const paid = a ? a.paid : 0;
+      const state = !r.s
+        ? ""
+        : a?.received
+          ? "Paid"
+          : paid > 0
+            ? "Part"
+            : "Pending";
+      return {
+        ...r,
+        rent: r.p ? r.p._rent || 0 : 0,
+        paid,
+        payDate: a ? a.received || a.last || "" : "",
+        payState: state,
+        // days from the sale date until the payment was received
+        // (still counting up to today while it is not fully received)
+        days: r.s
+          ? Math.max(0, daysBetween(r.s.entry_date, a?.received || today()))
+          : null,
+        daysPending: Boolean(r.s) && !a?.received,
+        // margin = sale total - purchase total - vehicle rent
+        // (only when the load was sold as ONE sale, so nothing is double counted)
+        margin:
+          r.p && r.s && r.p._sales.length === 1
+            ? Number(r.s.gross_total || 0) -
+              Number(r.p.purchase_total || 0) -
+              (r.p._rent || 0)
+            : null,
+      };
+    });
+
+    const q = search.trim().toLowerCase();
+
+    const get = {
+      vehicle: (r) => r.p?.vehicle_number || r.s?.vehicle_number,
+      pdate: (r) => (r.p ? dayOf(r.p.entry_date) : null),
+      pco: (r) => companyMap[r.p?.company_id],
+      prate: (r) => (r.p ? Number(r.p.rate || 0) : null),
+      pqty: (r) => (r.p ? Number(r.p.quantity || 0) : null),
+      ptotal: (r) => (r.p ? Number(r.p.purchase_total || 0) : null),
+      rent: (r) => (r.p ? r.rent : null),
+      sdate: (r) => (r.s ? dayOf(r.s.entry_date) : null),
+      sco: (r) => companyMap[r.s?.company_id],
+      stotal: (r) => (r.s ? Number(r.s.gross_total || 0) : null),
+      udate: (r) => (r.s?.unload_date ? dayOf(r.s.unload_date) : null),
+      uqty: (r) => (r.s ? Number(r.s.unload_quantity || 0) : null),
+      paydate: (r) => r.payDate || null,
+      days: (r) => r.days,
+      paytotal: (r) => (r.s ? r.paid : null),
+      margin: (r) => r.margin,
+    };
+
+    const filtered = withPay.filter((r) => {
+      const date = dayOf((r.p || r.s).entry_date);
+      if (vPCompany && r.p?.company_id !== vPCompany) return false;
+      if (vSCompany && r.s?.company_id !== vSCompany) return false;
+      if (vFrom && date < vFrom) return false;
+      if (vTo && date > vTo) return false;
+      if (vPay && r.payState !== vPay) return false;
+      if (q) {
+        const text = [
+          r.p?.vehicle_number,
+          r.s?.vehicle_number,
+          r.p?.voucher_no,
+          r.s?.voucher_no,
+          companyMap[r.p?.company_id],
+          companyMap[r.s?.company_id],
+        ]
+          .join(" ")
+          .toLowerCase();
+        if (!text.includes(q)) return false;
+      }
+      return true;
+    });
+
+    const rows = sortRows(filtered, get[vSort.key], vSort);
+
+    // each purchase counted once even when sold in several parts
+    const seen = new Set();
+    const soldSeen = new Set();
+    const totals = {
+      pQty: 0,
+      pTotal: 0,
+      rent: 0,
+      sTotal: 0,
+      uQty: 0,
+      paid: 0,
+      soldPurchase: 0,
+      soldRent: 0,
+      soldSale: 0,
+      margin: 0,
+    };
+    rows.forEach((r) => {
+      if (r.p && !seen.has(r.p.id)) {
+        seen.add(r.p.id);
+        totals.pQty += Number(r.p.quantity || 0);
+        totals.pTotal += Number(r.p.purchase_total || 0);
+        totals.rent += r.rent;
+      }
+      // margin total: sold loads only (purchase and rent counted once)
+      if (r.p && r.s) {
+        if (!soldSeen.has(r.p.id)) {
+          soldSeen.add(r.p.id);
+          totals.soldPurchase += Number(r.p.purchase_total || 0);
+          totals.soldRent += r.rent;
+        }
+        totals.soldSale += Number(r.s.gross_total || 0);
+      }
+      if (r.s) {
+        totals.sTotal += Number(r.s.gross_total || 0);
+        totals.uQty += Number(r.s.unload_quantity || 0);
+        totals.paid += r.paid;
+      }
+    });
+
+    totals.margin = totals.soldSale - totals.soldPurchase - totals.soldRent;
+
+    return { rows, totals };
+  }, [
+    purchasesList,
+    salesList,
+    rentsList,
+    alloc,
+    companyMap,
+    vPCompany,
+    vSCompany,
+    vFrom,
+    vTo,
+    vPay,
+    vSort,
+    search,
+  ]);
+
+  const tripsFiltered = Boolean(
+    vPCompany || vSCompany || vFrom || vTo || vPay || search,
   );
 
   // ===================================================
@@ -2058,6 +2323,81 @@ export default function App() {
       };
     }
 
+    // ---- Vehicle details
+    if (page === TRIPS) {
+      const parts = [];
+      if (vPCompany) parts.push(`Purchase name: ${name(vPCompany)}`);
+      if (vSCompany) parts.push(`Sale name: ${name(vSCompany)}`);
+      if (vFrom) parts.push(`From ${vFrom}`);
+      if (vTo) parts.push(`To ${vTo}`);
+      if (vPay) parts.push(`Payment: ${vPay}`);
+      if (search) parts.push(`Search: ${search}`);
+
+      const t = tripsView.totals;
+      const cols = TRIP_COLS.filter(
+        ([, , , , need]) =>
+          !need || (need === "owner" ? isOwner : canSeeFinance),
+      ).map(([, key]) => key);
+
+      const cell = {
+        vehicle: (r) => r.p?.vehicle_number || r.s?.vehicle_number || "",
+        pdate: (r) => (r.p ? day(r.p.entry_date) : ""),
+        pco: (r) => (r.p ? name(r.p.company_id) : ""),
+        prate: (r) => (r.p && r.p.rate != null ? Number(r.p.rate) : null),
+        pqty: (r) => (r.p ? Number(r.p.quantity || 0) : null),
+        ptotal: (r) => (r.p ? Number(r.p.purchase_total || 0) : null),
+        rent: (r) => r.rent || null,
+        sdate: (r) => (r.s ? day(r.s.entry_date) : ""),
+        sco: (r) => (r.s ? name(r.s.company_id) : ""),
+        stotal: (r) => (r.s ? Number(r.s.gross_total || 0) : null),
+        udate: (r) => (r.s ? day(r.s.unload_date) : ""),
+        uqty: (r) => (r.s ? Number(r.s.unload_quantity || 0) : null),
+        paydate: (r) =>
+          !r.s
+            ? ""
+            : r.payDate
+              ? `${day(r.payDate)}${r.payState === "Part" ? " (part)" : ""}`
+              : "Pending",
+        days: (r) => (r.s ? r.days : null),
+        paytotal: (r) => (r.s ? r.paid : null),
+        margin: (r) => r.margin,
+      };
+
+      const totalCell = {
+        vehicle: `Total (${tripsView.rows.length} records)`,
+        pqty: t.pQty,
+        ptotal: t.pTotal,
+        rent: t.rent,
+        stotal: t.sTotal,
+        uqty: t.uQty,
+        paytotal: t.paid,
+        margin: t.margin,
+      };
+
+      const kindOf = {
+        prate: "money",
+        pqty: "qty",
+        ptotal: "money",
+        rent: "money",
+        stotal: "money",
+        uqty: "qty",
+        days: "int",
+        paytotal: "money",
+        margin: "money",
+      };
+
+      return {
+        title: "Vehicle Details",
+        filterText: parts.join(", "),
+        headers: TRIP_COLS.filter(([, key]) => cols.includes(key)).map(
+          ([label]) => label,
+        ),
+        kinds: cols.map((k) => kindOf[k] || null),
+        rows: tripsView.rows.map((r) => cols.map((k) => cell[k](r))),
+        totalsRow: cols.map((k) => totalCell[k] ?? ""),
+      };
+    }
+
     // ---- Payment dues: one list at a time (chosen in the export window)
     if (page === DUES) {
       const isDue = which !== "pay";
@@ -2385,17 +2725,19 @@ export default function App() {
 
       // the company picked in the page filter is used in the file name
       const companyId =
-        page === TRACK
-          ? tPCompany || tSCompany
-          : page === UNLOAD
-            ? uCompany
-            : page === LEDGER
-              ? lCompany
-              : page === RENT
-                ? rCompany
-                : page === SUMMARY
-                  ? sCompany
-                  : filters?.company;
+        page === TRIPS
+          ? vPCompany || vSCompany
+          : page === TRACK
+            ? tPCompany || tSCompany
+            : page === UNLOAD
+              ? uCompany
+              : page === LEDGER
+                ? lCompany
+                : page === RENT
+                  ? rCompany
+                  : page === SUMMARY
+                    ? sCompany
+                    : filters?.company;
       spec.company = companyMap[companyId] || "";
 
       if (page === TRACK && !isOwner) {
@@ -3332,7 +3674,7 @@ export default function App() {
                 placeholder={
                   page === RENT
                     ? "Search vehicle / account..."
-                    : page === TRACK
+                    : page === TRACK || page === TRIPS
                       ? "Search vehicle / voucher..."
                       : page === SUMMARY
                         ? "Search company..."
@@ -3373,6 +3715,7 @@ export default function App() {
               page !== SUMMARY &&
               page !== LEDGER &&
               page !== DUES &&
+              page !== TRIPS &&
               (page === UNLOAD ||
                 ["Purchases", "Sales", "Rents"].includes(dataPage)) && (
                 <button
@@ -3400,6 +3743,7 @@ export default function App() {
               page !== SUMMARY &&
               page !== LEDGER &&
               page !== UNLOAD &&
+              page !== TRIPS &&
               page !== DUES && (
                 <button
                   className="secondary"
@@ -3421,6 +3765,7 @@ export default function App() {
               page !== SUMMARY &&
               page !== LEDGER &&
               page !== UNLOAD &&
+              page !== TRIPS &&
               page !== DUES && (
                 <button
                   className="primary"
@@ -3476,9 +3821,13 @@ export default function App() {
 
           <span className="subtabs-sep" aria-hidden="true" />
 
-          {[LEDGER, DUES, UNLOAD, TRACK]
+          {[LEDGER, DUES, UNLOAD, TRACK, TRIPS]
             .filter(
-              (name) => canSeeFinance || name === TRACK || name === UNLOAD,
+              (name) =>
+                canSeeFinance ||
+                name === TRACK ||
+                name === UNLOAD ||
+                name === TRIPS,
             )
             .map((name) => {
               const folder = biz || folders[0].name;
@@ -3880,6 +4229,271 @@ export default function App() {
                           <b>{money(tracking.totals.margin)}</b>
                         </div>
                       </>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : page === TRIPS ? (
+            /* VEHICLE DETAILS */
+
+            <div className="panel fill">
+              <div className="table-toolbar">
+                <div>
+                  <h3>Vehicle details</h3>
+
+                  <p className="muted">
+                    {tripsFiltered
+                      ? `${tripsView.rows.length} records (filtered)`
+                      : `${tripsView.rows.length} records`}
+                    {summaryLoading && !summaryFirstLoad && " · refreshing…"}
+                  </p>
+                </div>
+
+                <div className="filter-bar">
+                  <label>
+                    Purchase name
+                    <select
+                      value={vPCompany}
+                      onChange={(e) => setVPCompany(e.target.value)}
+                    >
+                      <option value="">All companies</option>
+                      {suppliers.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    Sale name
+                    <select
+                      value={vSCompany}
+                      onChange={(e) => setVSCompany(e.target.value)}
+                    >
+                      <option value="">All companies</option>
+                      {customers.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    From
+                    <input
+                      type="date"
+                      value={vFrom}
+                      max={vTo || undefined}
+                      onChange={(e) => setVFrom(e.target.value)}
+                    />
+                  </label>
+
+                  <label>
+                    To
+                    <input
+                      type="date"
+                      value={vTo}
+                      min={vFrom || undefined}
+                      onChange={(e) => setVTo(e.target.value)}
+                    />
+                  </label>
+
+                  {canSeeFinance && (
+                    <label>
+                      Payment
+                      <select
+                        value={vPay}
+                        onChange={(e) => setVPay(e.target.value)}
+                      >
+                        <option value="">All</option>
+                        <option value="Paid">Received in full</option>
+                        <option value="Part">Part received</option>
+                        <option value="Pending">Pending</option>
+                      </select>
+                    </label>
+                  )}
+
+                  {tripsFiltered && (
+                    <button
+                      type="button"
+                      className="secondary clear-filters"
+                      onClick={() => {
+                        setVPCompany("");
+                        setVSCompany("");
+                        setVFrom("");
+                        setVTo("");
+                        setVPay("");
+                        setSearch("");
+                      }}
+                    >
+                      <X size={14} />
+                      Clear filters
+                    </button>
+                  )}
+                </div>
+
+                {exportButtons}
+              </div>
+
+              {summaryFirstLoad ? (
+                <p className="muted pad">Loading records...</p>
+              ) : (
+                <div className="table-wrap">
+                  <table className="summary-table">
+                    <thead>
+                      <tr>
+                        {TRIP_COLS.filter(
+                          ([, , , , need]) =>
+                            !need ||
+                            (need === "owner" ? isOwner : canSeeFinance),
+                        ).map(([label, key, kind, right]) => (
+                          <SortTh
+                            key={key}
+                            label={label}
+                            k={key}
+                            kind={kind}
+                            right={right}
+                            sort={vSort}
+                            onSort={sortV}
+                          />
+                        ))}
+                      </tr>
+                    </thead>
+
+                    <tbody>
+                      {tripsView.rows.map((r) => (
+                        <tr key={r.key}>
+                          <td>
+                            <b>
+                              {r.p?.vehicle_number ||
+                                r.s?.vehicle_number ||
+                                "—"}
+                            </b>
+                          </td>
+                          <td>{r.p ? dayOf(r.p.entry_date) : "—"}</td>
+                          <td>
+                            {r.p ? companyMap[r.p.company_id] || "—" : "—"}
+                          </td>
+                          <td className="num">
+                            {r.p && r.p.rate != null ? money(r.p.rate) : "—"}
+                          </td>
+                          <td className="num">
+                            {r.p ? qty(r.p.quantity) : "—"}
+                          </td>
+                          <td className="num">
+                            {r.p ? money(r.p.purchase_total) : "—"}
+                          </td>
+                          {isOwner && (
+                            <td className="num">
+                              {r.rent ? money(r.rent) : "—"}
+                            </td>
+                          )}
+                          <td>{r.s ? dayOf(r.s.entry_date) : "—"}</td>
+                          <td>
+                            {r.s ? companyMap[r.s.company_id] || "—" : "—"}
+                          </td>
+                          <td className="num">
+                            {r.s ? money(r.s.gross_total) : "—"}
+                          </td>
+                          <td>
+                            {r.s?.unload_date ? dayOf(r.s.unload_date) : "—"}
+                          </td>
+                          <td className="num">
+                            {r.s && Number(r.s.unload_quantity || 0) > 0
+                              ? qty(r.s.unload_quantity)
+                              : "—"}
+                          </td>
+                          {canSeeFinance && (
+                            <>
+                              <td>
+                                {!r.s ? (
+                                  "—"
+                                ) : r.payDate ? (
+                                  <>
+                                    {dayOf(r.payDate)}
+                                    {r.payState === "Part" && (
+                                      <small className="muted"> · part</small>
+                                    )}
+                                  </>
+                                ) : (
+                                  <span className="status-pill pending">
+                                    Pending
+                                  </span>
+                                )}
+                              </td>
+                              <td className="num">
+                                {r.days == null
+                                  ? "—"
+                                  : `${r.days}${r.daysPending ? " · pending" : ""}`}
+                              </td>
+                              <td className="num">
+                                {r.s ? money(r.paid) : "—"}
+                              </td>
+                            </>
+                          )}
+                          {isOwner && (
+                            <td
+                              className={`num ${r.margin > 0 ? "due-in" : r.margin < 0 ? "due-out" : ""}`}
+                              title="Sale total - purchase total - vehicle rent"
+                            >
+                              {r.margin === null ? "—" : money(r.margin)}
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+
+                  {!tripsView.rows.length && (
+                    <p className="muted pad">No records found.</p>
+                  )}
+                </div>
+              )}
+
+              {!summaryFirstLoad && (
+                <div className="totals-bar one-line">
+                  <div className="totals-label">
+                    {tripsFiltered ? "Filtered totals" : "Totals"}
+                    <small>{tripsView.rows.length} records</small>
+                  </div>
+
+                  <div className="totals-items">
+                    <div>
+                      <span>Purchase qty (qtl)</span>
+                      <b>{qty(tripsView.totals.pQty)}</b>
+                    </div>
+                    <div>
+                      <span>Purchase total</span>
+                      <b>{money(tripsView.totals.pTotal)}</b>
+                    </div>
+                    {isOwner && (
+                      <div>
+                        <span>Vehicle rent</span>
+                        <b>{money(tripsView.totals.rent)}</b>
+                      </div>
+                    )}
+                    <div>
+                      <span>Sale total</span>
+                      <b>{money(tripsView.totals.sTotal)}</b>
+                    </div>
+                    <div>
+                      <span>Unload qty (qtl)</span>
+                      <b>{qty(tripsView.totals.uQty)}</b>
+                    </div>
+                    {canSeeFinance && (
+                      <div>
+                        <span>Payment received</span>
+                        <b>{money(tripsView.totals.paid)}</b>
+                      </div>
+                    )}
+                    {isOwner && (
+                      <div>
+                        <span>Margin (sold, after rent)</span>
+                        <b>{money(tripsView.totals.margin)}</b>
+                      </div>
                     )}
                   </div>
                 </div>
