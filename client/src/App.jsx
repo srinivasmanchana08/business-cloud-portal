@@ -92,6 +92,10 @@ const PAGE_LABEL = {
 // Pages shown directly in the sidebar
 const USERS = "Users";
 
+// Signed-in screens log out after this much time without any activity
+const IDLE_LIMIT_MS = 30 * 60 * 1000;
+const ACTIVE_KEY = "ms-last-active";
+
 const nav = [
   ["Dashboard", LayoutDashboard],
   ["Companies", Building2],
@@ -1018,6 +1022,9 @@ export default function App() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [authMode, setAuthMode] = useState("signin"); // "signin" | "signup"
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [loginNote, setLoginNote] = useState(""); // friendly message on the login screen
 
   // ===================================================
   // 6. AUTHENTICATION SESSION
@@ -1060,6 +1067,82 @@ export default function App() {
       subscription.unsubscribe();
     };
   }, []);
+
+  // ---- automatic sign-out after 30 minutes without activity
+  useEffect(() => {
+    if (!session) return undefined;
+
+    const readStamp = () => {
+      try {
+        return Number(localStorage.getItem(ACTIVE_KEY)) || 0;
+      } catch {
+        return 0;
+      }
+    };
+    const writeStamp = (t) => {
+      try {
+        localStorage.setItem(ACTIVE_KEY, String(t));
+      } catch {
+        /* storage unavailable: the in-memory time below still works */
+      }
+    };
+
+    let last = Date.now();
+    let signingOut = false;
+
+    // browser was closed / computer slept for a long time: sign out now
+    const saved = readStamp();
+    if (saved && Date.now() - saved > IDLE_LIMIT_MS) last = saved;
+    else writeStamp(last);
+
+    const check = async () => {
+      // another open tab may have been used more recently
+      last = Math.max(last, readStamp());
+      if (signingOut || Date.now() - last < IDLE_LIMIT_MS) return;
+
+      signingOut = true;
+      setLoginNote("You were signed out after 30 minutes of inactivity.");
+      await auth.auth.signOut();
+      dispatch(setBusiness(""));
+      setBiz("");
+      setPage("Dashboard");
+    };
+
+    let lastWrite = 0;
+    const onActivity = () => {
+      const now = Date.now();
+      if (signingOut) return;
+      // an already-expired session is not revived by a mouse move
+      if (now - last >= IDLE_LIMIT_MS) return check();
+      last = now;
+      if (now - lastWrite > 10000) {
+        lastWrite = now;
+        writeStamp(now);
+      }
+      return undefined;
+    };
+
+    const events = [
+      "mousemove",
+      "mousedown",
+      "keydown",
+      "touchstart",
+      "scroll",
+      "click",
+    ];
+    events.forEach((e) =>
+      window.addEventListener(e, onActivity, { passive: true }),
+    );
+    document.addEventListener("visibilitychange", check);
+    const timer = setInterval(check, 30 * 1000);
+    check();
+
+    return () => {
+      events.forEach((e) => window.removeEventListener(e, onActivity));
+      document.removeEventListener("visibilitychange", check);
+      clearInterval(timer);
+    };
+  }, [session?.user?.id, dispatch]);
 
   // ===================================================
   // 7. API REQUEST HEADERS
@@ -1150,9 +1233,15 @@ export default function App() {
   // 9. LOAD DATA (cached in Redux, refreshed in background)
   // ===================================================
 
-  const userId = session?.user?.id || null;
   // set in Supabase: app_metadata -> { "role": "owner" } (see owner_permissions.sql)
   const role = session ? getRole(session) : "";
+  // someone who registered on the login screen and has no role yet waits for
+  // the owner to approve them (Users page) and loads no data until then
+  const pending =
+    Boolean(session) &&
+    !role &&
+    session.user?.user_metadata?.self_signup === true;
+  const userId = pending ? null : session?.user?.id || null;
   const isOwner = role === "owner";
   // viewers can look at records but cannot add, edit or delete
   const isViewer = role === "viewer";
@@ -2959,6 +3048,7 @@ export default function App() {
     event.preventDefault();
 
     setError("");
+    setLoginNote("");
     setBusy(true);
 
     try {
@@ -2967,6 +3057,69 @@ export default function App() {
         password,
       });
 
+      if (error) throw error;
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function register(event) {
+    event.preventDefault();
+
+    setError("");
+    setLoginNote("");
+
+    if (password.length < 6) {
+      setError("Password must be at least 6 characters.");
+      return;
+    }
+    if (password !== confirmPassword) {
+      setError("The two passwords do not match.");
+      return;
+    }
+
+    setBusy(true);
+
+    try {
+      const { data, error } = await auth.auth.signUp({
+        email,
+        password,
+        options: { data: { self_signup: true } },
+      });
+
+      if (error) throw error;
+
+      // the address already has an account (Supabase hides this on purpose)
+      if (data.user && data.user.identities?.length === 0) {
+        setError("This email is already registered. Please sign in.");
+        return;
+      }
+
+      if (!data.session) {
+        // email confirmation is switched on in Supabase
+        setAuthMode("signin");
+        setPassword("");
+        setConfirmPassword("");
+        setLoginNote(
+          "Account created. Confirm your email (check your inbox), then sign in. The owner will then give you access.",
+        );
+      }
+      // otherwise the session starts and the "waiting for approval" screen shows
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // "Check again" on the waiting screen: pick up a role the owner just gave
+  async function recheckAccess() {
+    setError("");
+    setBusy(true);
+    try {
+      const { error } = await auth.auth.refreshSession();
       if (error) throw error;
     } catch (err) {
       setError(getErrorMessage(err));
@@ -3624,18 +3777,58 @@ export default function App() {
     );
   }
 
-  if (!session) {
+  if (pending) {
     return (
       <main className="login-wrap">
-        <form className="login-card" onSubmit={login}>
+        <div className="login-card">
           <div className="brand-mark">MS</div>
 
           <p className="eyebrow">MANCHANA SRINIVAS</p>
 
-          <h1>Welcome back</h1>
+          <h1>Waiting for approval</h1>
 
-          <p className="muted">Sign in to manage your business records.</p>
+          <p className="muted">
+            Your account ({session.user?.email}) is created. The owner needs to
+            give you access before you can see any records.
+          </p>
 
+          {error && <div className="error">{error}</div>}
+
+          <button
+            className="primary full"
+            disabled={busy}
+            onClick={recheckAccess}
+          >
+            {busy ? "Checking..." : "Check again"}
+          </button>
+
+          <button className="secondary full" onClick={logout}>
+            Sign out
+          </button>
+        </div>
+      </main>
+    );
+  }
+
+  if (!session) {
+    const signup = authMode === "signup";
+
+    return (
+      <main className="login-wrap">
+        <form className="login-card" onSubmit={signup ? register : login}>
+          <div className="brand-mark">MS</div>
+
+          <p className="eyebrow">MANCHANA SRINIVAS</p>
+
+          <h1>{signup ? "Create account" : "Welcome back"}</h1>
+
+          <p className="muted">
+            {signup
+              ? "Register with your email. The owner will approve your access."
+              : "Sign in to manage your business records."}
+          </p>
+
+          {loginNote && <div className="muted pad">{loginNote}</div>}
           {error && <div className="error">{error}</div>}
 
           <label>
@@ -3655,17 +3848,49 @@ export default function App() {
               type="password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
-              autoComplete="current-password"
+              autoComplete={signup ? "new-password" : "current-password"}
+              minLength={signup ? 6 : undefined}
               required
             />
           </label>
 
+          {signup && (
+            <label>
+              Confirm password
+              <input
+                type="password"
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                autoComplete="new-password"
+                required
+              />
+            </label>
+          )}
+
           <button className="primary full" disabled={busy}>
-            {busy ? "Signing in..." : "Sign in"}
+            {busy
+              ? signup
+                ? "Creating account..."
+                : "Signing in..."
+              : signup
+                ? "Sign up"
+                : "Sign in"}
           </button>
 
           <small className="muted">
-            Create authorized accounts in your Supabase dashboard.
+            {signup ? "Already have an account? " : "New here? "}
+            <a
+              href="#"
+              onClick={(event) => {
+                event.preventDefault();
+                setError("");
+                setLoginNote("");
+                setConfirmPassword("");
+                setAuthMode(signup ? "signin" : "signup");
+              }}
+            >
+              {signup ? "Sign in" : "Create an account"}
+            </a>
           </small>
         </form>
       </main>

@@ -171,6 +171,18 @@ async function requireAuth(req, res, next) {
 // Protect all API routes.
 app.use("/api", requireAuth);
 
+// People who registered themselves on the login screen get no data until the
+// owner gives them a role (Users page).
+app.use("/api", (req, res, next) => {
+  const meta = req.user?.app_metadata || {};
+  if (!meta.role && req.user?.user_metadata?.self_signup === true) {
+    return res
+      .status(403)
+      .json({ error: "Your account is waiting for the owner's approval." });
+  }
+  next();
+});
+
 // View-only accounts: reading is allowed, any change is refused.
 app.use("/api", (req, res, next) => {
   if (isViewer(req) && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
