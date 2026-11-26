@@ -46,6 +46,7 @@ import {
   X,
   FileSpreadsheet,
   FileText,
+  Users as UsersIcon,
 } from "lucide-react";
 
 import { exportExcel, exportPdf } from "./exportUtils";
@@ -89,9 +90,12 @@ const PAGE_LABEL = {
 };
 
 // Pages shown directly in the sidebar
+const USERS = "Users";
+
 const nav = [
   ["Dashboard", LayoutDashboard],
   ["Companies", Building2],
+  [USERS, UsersIcon], // owner only (see OWNER_ONLY_PAGES)
 ];
 
 // Dropdown folders in the sidebar. Add page names to `items` to move them in.
@@ -138,7 +142,7 @@ function getRole(session) {
 }
 
 // Pages only the owner can open (also enforced by the API and Supabase RLS)
-const OWNER_ONLY_PAGES = ["Payments", "Vehicle Rent"];
+const OWNER_ONLY_PAGES = ["Payments", "Vehicle Rent", "Users"];
 
 // Pages a view-only account does not get in its sidebar
 const VIEWER_HIDDEN_PAGES = ["Companies"];
@@ -180,6 +184,163 @@ folders.sort((a, b) => byName(a.name, b.name));
 folders.forEach((f) =>
   f.items.sort(([a], [b]) => byName(labelOf(a), labelOf(b))),
 );
+
+// =====================================================
+// USERS PAGE (owner only): give new sign-ups a role
+// =====================================================
+
+const ROLE_OPTIONS = [
+  ["", "No role (new)"],
+  ["viewer", "Viewer (read only)"],
+  ["owner", "Owner (full access)"],
+];
+
+const shortDate = (value) =>
+  value
+    ? new Date(value).toLocaleDateString("en-IN", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      })
+    : "—";
+
+function UsersPanel({ api, myId }) {
+  const [users, setUsers] = useState(null); // null = loading
+  const [loadError, setLoadError] = useState("");
+  const [saving, setSaving] = useState("");
+  const [message, setMessage] = useState(null); // { tone, text }
+
+  const load = useCallback(async () => {
+    setLoadError("");
+    try {
+      setUsers(await api("users"));
+    } catch (err) {
+      setUsers([]);
+      setLoadError(err?.message || "Could not load users.");
+    }
+  }, [api]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const changeRole = async (user, role) => {
+    if (role === user.role) return;
+
+    if (
+      role === "owner" &&
+      !window.confirm(
+        `Give ${user.email} FULL owner access (all data, payments and rent, and managing users)?`,
+      )
+    ) {
+      return;
+    }
+
+    setSaving(user.id);
+    setMessage(null);
+
+    try {
+      await api(`users/${user.id}/role`, {
+        method: "PUT",
+        body: JSON.stringify({ role }),
+      });
+      setUsers((list) =>
+        list.map((u) => (u.id === user.id ? { ...u, role } : u)),
+      );
+      setMessage({
+        tone: "ok",
+        text: `${user.email} is now ${role || "without a role"}. It applies after they sign out and sign in again.`,
+      });
+    } catch (err) {
+      setMessage({ tone: "error", text: err?.message || "Could not save." });
+    } finally {
+      setSaving("");
+    }
+  };
+
+  const noRole = (users || []).filter((u) => !u.role).length;
+
+  return (
+    <div className="panel fill">
+      <div className="table-toolbar">
+        <div>
+          <h3>Users</h3>
+          <p className="muted">
+            {users === null
+              ? "Loading…"
+              : `${users.length} people${noRole ? ` · ${noRole} waiting for a role` : ""}`}
+          </p>
+        </div>
+
+        <button type="button" className="secondary" onClick={load}>
+          <RefreshCw size={15} />
+          <span className="add-text">Refresh</span>
+        </button>
+      </div>
+
+      <p className="muted pad">
+        Viewer = can look at records, cannot add, edit or delete. Owner = full
+        access. No role = not set yet (cannot see payments or rent). A new role
+        works after the person signs out and signs in again.
+      </p>
+
+      {message && (
+        <div className={message.tone === "error" ? "error" : "muted pad"}>
+          {message.text}
+        </div>
+      )}
+      {loadError && <div className="error">{loadError}</div>}
+
+      {users !== null && (
+        <div className="table-wrap">
+          <table className="summary-table">
+            <thead>
+              <tr>
+                <th>Email</th>
+                <th>Signed up</th>
+                <th>Last sign in</th>
+                <th>Role</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {users.map((u) => (
+                <tr key={u.id}>
+                  <td>
+                    <b>{u.email}</b>
+                    {u.id === myId && <small className="muted"> · you</small>}
+                    {!u.confirmed && (
+                      <small className="muted"> · email not confirmed</small>
+                    )}
+                  </td>
+                  <td>{shortDate(u.created_at)}</td>
+                  <td>{shortDate(u.last_sign_in_at)}</td>
+                  <td>
+                    <select
+                      value={u.role}
+                      disabled={u.id === myId || saving === u.id}
+                      onChange={(e) => changeRole(u, e.target.value)}
+                    >
+                      {ROLE_OPTIONS.map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {!users.length && !loadError && (
+            <p className="muted pad">No users found.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // =====================================================
 // 4. HELPERS
@@ -3564,7 +3725,11 @@ export default function App() {
           return (
             <>
               {nav
-                .filter(([n]) => !(isViewer && VIEWER_HIDDEN_PAGES.includes(n)))
+                .filter(
+                  ([n]) =>
+                    !(isViewer && VIEWER_HIDDEN_PAGES.includes(n)) &&
+                    (isOwner || !OWNER_ONLY_PAGES.includes(n)),
+                )
                 .map(([name, Icon]) => (
                   <button
                     key={name}
@@ -3666,7 +3831,7 @@ export default function App() {
             {biz && <span className="muted">{biz}</span>}
           </div>
 
-          {page !== "Dashboard" && (
+          {page !== "Dashboard" && page !== USERS && (
             <div className="searchbox top-search">
               <Search size={16} />
 
@@ -3716,6 +3881,7 @@ export default function App() {
               page !== LEDGER &&
               page !== DUES &&
               page !== TRIPS &&
+              page !== USERS &&
               (page === UNLOAD ||
                 ["Purchases", "Sales", "Rents"].includes(dataPage)) && (
                 <button
@@ -3744,6 +3910,7 @@ export default function App() {
               page !== LEDGER &&
               page !== UNLOAD &&
               page !== TRIPS &&
+              page !== USERS &&
               page !== DUES && (
                 <button
                   className="secondary"
@@ -3766,6 +3933,7 @@ export default function App() {
               page !== LEDGER &&
               page !== UNLOAD &&
               page !== TRIPS &&
+              page !== USERS &&
               page !== DUES && (
                 <button
                   className="primary"
@@ -3871,6 +4039,8 @@ export default function App() {
                 goToPage(name, business || folders[0].name)
               }
             />
+          ) : page === USERS ? (
+            <UsersPanel api={api} myId={userId} />
           ) : page === TRACK ? (
             /* VEHICLE TRACKING */
 

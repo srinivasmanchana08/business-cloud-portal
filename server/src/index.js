@@ -572,6 +572,105 @@ for (const [key, config] of Object.entries(resources)) {
 }
 
 // ==========================================
+// 7b. USER ROLES (owner only)
+// Lists the people who signed up and lets the owner set their role.
+// Needs SUPABASE_SERVICE_ROLE_KEY (Supabase > Project Settings > API >
+// service_role). Keep it on the server only - never in the frontend.
+// ==========================================
+
+const ROLES = ["", "viewer", "owner"]; // "" = no role
+
+let adminClient = null;
+const adminApi = () => {
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) return null;
+  adminClient ||= createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_ROLE_KEY,
+    { auth: { autoRefreshToken: false, persistSession: false } },
+  );
+  return adminClient.auth.admin;
+};
+
+const ownerOnlyRoute = (req, res, next) =>
+  isOwner(req)
+    ? next()
+    : res.status(403).json({ error: "Only the owner can manage users." });
+
+app.get("/api/users", ownerOnlyRoute, async (_req, res) => {
+  try {
+    const admin = adminApi();
+    if (!admin) {
+      return res.status(503).json({
+        error:
+          "User management is not set up. Add SUPABASE_SERVICE_ROLE_KEY to the server environment and redeploy.",
+      });
+    }
+
+    const users = [];
+    for (let page = 1; page <= 20; page++) {
+      const { data, error } = await admin.listUsers({ page, perPage: 200 });
+      if (error) throw error;
+      users.push(...data.users);
+      if (data.users.length < 200) break;
+    }
+
+    res.json(
+      users
+        .map((u) => ({
+          id: u.id,
+          email: u.email || u.phone || "(no email)",
+          role: u.app_metadata?.role || "",
+          created_at: u.created_at,
+          last_sign_in_at: u.last_sign_in_at || null,
+          confirmed: Boolean(u.email_confirmed_at || u.confirmed_at),
+        }))
+        .sort((a, b) =>
+          String(b.created_at).localeCompare(String(a.created_at)),
+        ),
+    );
+  } catch (error) {
+    console.error("List users failed:", error.message);
+    res.status(500).json({ error: "Could not load users." });
+  }
+});
+
+app.put("/api/users/:id/role", ownerOnlyRoute, async (req, res) => {
+  try {
+    const admin = adminApi();
+    if (!admin) {
+      return res.status(503).json({
+        error:
+          "User management is not set up. Add SUPABASE_SERVICE_ROLE_KEY to the server environment and redeploy.",
+      });
+    }
+
+    const role = String(req.body?.role ?? "");
+    if (!ROLES.includes(role)) {
+      return res
+        .status(400)
+        .json({ error: "Role must be viewer, owner or empty." });
+    }
+
+    // the owner can not remove their own owner access by mistake
+    if (req.params.id === req.user.id) {
+      return res
+        .status(400)
+        .json({ error: "You cannot change your own role." });
+    }
+
+    const { data, error } = await admin.updateUserById(req.params.id, {
+      app_metadata: { role: role || null }, // null removes the role
+    });
+    if (error) throw error;
+
+    res.json({ id: data.user.id, role: data.user.app_metadata?.role || "" });
+  } catch (error) {
+    console.error("Change role failed:", error.message);
+    res.status(500).json({ error: "Could not change the role." });
+  }
+});
+
+// ==========================================
 // 8. DASHBOARD + BOOTSTRAP API
 // ==========================================
 
