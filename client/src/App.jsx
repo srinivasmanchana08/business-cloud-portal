@@ -96,6 +96,24 @@ const USERS = "Users";
 const IDLE_LIMIT_MS = 30 * 60 * 1000;
 const ACTIVE_KEY = "ms-last-active";
 
+// "now" is the start of a fresh idle period; clearing it forgets the old one.
+// This must be done at every sign-in, otherwise the time from the PREVIOUS
+// session makes the new session look idle and signs it out again.
+const markActive = () => {
+  try {
+    localStorage.setItem(ACTIVE_KEY, String(Date.now()));
+  } catch {
+    /* storage unavailable */
+  }
+};
+const clearActive = () => {
+  try {
+    localStorage.removeItem(ACTIVE_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+};
+
 const nav = [
   ["Dashboard", LayoutDashboard],
   ["Companies", Building2],
@@ -208,6 +226,16 @@ const shortDate = (value) =>
       })
     : "—";
 
+const shortDateTime = (value) =>
+  value
+    ? new Date(value).toLocaleString("en-IN", {
+        day: "2-digit",
+        month: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "—";
+
 function UsersPanel({ api, myId }) {
   const [users, setUsers] = useState(null); // null = loading
   const [loadError, setLoadError] = useState("");
@@ -289,7 +317,7 @@ function UsersPanel({ api, myId }) {
       </p>
 
       {message && (
-        <div className={message.tone === "error" ? "error" : "muted pad"}>
+        <div className={message.tone === "error" ? "error" : "notice-ok"}>
           {message.text}
         </div>
       )}
@@ -303,6 +331,7 @@ function UsersPanel({ api, myId }) {
                 <th>Email</th>
                 <th>Signed up</th>
                 <th>Last sign in</th>
+                <th>Logged-in devices</th>
                 <th>Role</th>
               </tr>
             </thead>
@@ -319,6 +348,26 @@ function UsersPanel({ api, myId }) {
                   </td>
                   <td>{shortDate(u.created_at)}</td>
                   <td>{shortDate(u.last_sign_in_at)}</td>
+                  <td>
+                    {u.devices === null ? (
+                      <small className="muted">Run user_sessions.sql</small>
+                    ) : !u.devices.length ? (
+                      <small className="muted">None</small>
+                    ) : (
+                      <div className="device-list">
+                        {u.devices.map((d) => (
+                          <span key={d.id}>
+                            {d.device}
+                            <small>
+                              {" "}
+                              · {shortDateTime(d.last_active)}
+                              {d.ip ? ` · ${d.ip}` : ""}
+                            </small>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </td>
                   <td>
                     <select
                       value={u.role}
@@ -1101,8 +1150,11 @@ export default function App() {
       if (signingOut || Date.now() - last < IDLE_LIMIT_MS) return;
 
       signingOut = true;
-      setLoginNote("You were signed out after 30 minutes of inactivity.");
-      await auth.auth.signOut();
+      setLoginNote(
+        "You were signed out after 30 minutes of inactivity. Please sign in again.",
+      );
+      clearActive();
+      await auth.auth.signOut({ scope: "local" }); // this device only
       dispatch(setBusiness(""));
       setBiz("");
       setPage("Dashboard");
@@ -3052,6 +3104,7 @@ export default function App() {
     setBusy(true);
 
     try {
+      markActive();
       const { error } = await auth.auth.signInWithPassword({
         email,
         password,
@@ -3083,6 +3136,7 @@ export default function App() {
     setBusy(true);
 
     try {
+      markActive();
       const { data, error } = await auth.auth.signUp({
         email,
         password,
@@ -3160,7 +3214,8 @@ export default function App() {
   async function logout() {
     setError("");
 
-    const { error } = await auth.auth.signOut();
+    clearActive();
+    const { error } = await auth.auth.signOut({ scope: "local" });
 
     if (error) {
       setError(error.message);
@@ -3828,7 +3883,7 @@ export default function App() {
               : "Sign in to manage your business records."}
           </p>
 
-          {loginNote && <div className="muted pad">{loginNote}</div>}
+          {loginNote && <div className="notice-ok">{loginNote}</div>}
           {error && <div className="error">{error}</div>}
 
           <label>
@@ -4200,45 +4255,47 @@ export default function App() {
 
         {/* ACCOUNTS TAB STRIP: menu + Ledger, Payment Dues, Vehicle Tracking on one line */}
 
-        <nav className="subtabs" aria-label="Accounts">
-          <button
-            type="button"
-            className="subtab subtab-menu"
-            onClick={toggleMenu}
-            aria-expanded={wide}
-            title={wide ? "Show icons only" : "Show menu names"}
-          >
-            <Menu size={18} />
-            <span>Menu</span>
-          </button>
+        {page !== USERS && (
+          <nav className="subtabs" aria-label="Accounts">
+            <button
+              type="button"
+              className="subtab subtab-menu"
+              onClick={toggleMenu}
+              aria-expanded={wide}
+              title={wide ? "Show icons only" : "Show menu names"}
+            >
+              <Menu size={18} />
+              <span>Menu</span>
+            </button>
 
-          <span className="subtabs-sep" aria-hidden="true" />
+            <span className="subtabs-sep" aria-hidden="true" />
 
-          {[LEDGER, DUES, UNLOAD, TRACK, TRIPS]
-            .filter(
-              (name) =>
-                canSeeFinance ||
-                name === TRACK ||
-                name === UNLOAD ||
-                name === TRIPS,
-            )
-            .map((name) => {
-              const folder = biz || folders[0].name;
-              const active = page === name && biz === folder;
+            {[LEDGER, DUES, UNLOAD, TRACK, TRIPS]
+              .filter(
+                (name) =>
+                  canSeeFinance ||
+                  name === TRACK ||
+                  name === UNLOAD ||
+                  name === TRIPS,
+              )
+              .map((name) => {
+                const folder = biz || folders[0].name;
+                const active = page === name && biz === folder;
 
-              return (
-                <button
-                  key={name}
-                  type="button"
-                  className={`subtab ${active ? "active" : ""}`}
-                  aria-current={active ? "page" : undefined}
-                  onClick={() => goToPage(name, folder)}
-                >
-                  {PAGE_LABEL[name] || name}
-                </button>
-              );
-            })}
-        </nav>
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    className={`subtab ${active ? "active" : ""}`}
+                    aria-current={active ? "page" : undefined}
+                    onClick={() => goToPage(name, folder)}
+                  >
+                    {PAGE_LABEL[name] || name}
+                  </button>
+                );
+              })}
+          </nav>
+        )}
 
         {/* PAGE CONTENT */}
 

@@ -603,6 +603,34 @@ const adminApi = () => {
   return adminClient.auth.admin;
 };
 
+// "Chrome on Windows" from a browser user-agent string
+const describeDevice = (ua = "") => {
+  if (!ua) return "Unknown device";
+  const browser = /Edg\//.test(ua)
+    ? "Edge"
+    : /OPR\/|Opera/.test(ua)
+      ? "Opera"
+      : /Chrome\//.test(ua)
+        ? "Chrome"
+        : /Firefox\//.test(ua)
+          ? "Firefox"
+          : /Safari\//.test(ua)
+            ? "Safari"
+            : "Browser";
+  const system = /Android/.test(ua)
+    ? "Android"
+    : /iPhone|iPad|iOS/.test(ua)
+      ? "iPhone/iPad"
+      : /Windows/.test(ua)
+        ? "Windows"
+        : /Mac OS X|Macintosh/.test(ua)
+          ? "Mac"
+          : /Linux/.test(ua)
+            ? "Linux"
+            : "";
+  return system ? `${browser} on ${system}` : browser;
+};
+
 const ownerOnlyRoute = (req, res, next) =>
   isOwner(req)
     ? next()
@@ -626,9 +654,34 @@ app.get("/api/users", ownerOnlyRoute, async (_req, res) => {
       if (data.users.length < 200) break;
     }
 
+    // logged-in devices (sessions). Needs user_sessions.sql run once in Supabase.
+    const devicesByUser = {};
+    let devicesOk = true;
+    const { data: sessions, error: sessionError } = await adminClient.rpc(
+      "admin_user_sessions",
+    );
+    if (sessionError) {
+      devicesOk = false;
+      console.error("Sessions unavailable:", sessionError.message);
+    } else {
+      (sessions || []).forEach((s) => {
+        (devicesByUser[s.user_id] ||= []).push({
+          id: s.session_id,
+          device: describeDevice(s.user_agent),
+          ip: s.ip || "",
+          last_active: s.updated_at || s.created_at,
+        });
+      });
+    }
+
     res.json(
       users
         .map((u) => ({
+          devices: devicesOk
+            ? (devicesByUser[u.id] || []).sort((a, b) =>
+                String(b.last_active).localeCompare(String(a.last_active)),
+              )
+            : null,
           id: u.id,
           email: u.email || u.phone || "(no email)",
           role: u.app_metadata?.role || "",
