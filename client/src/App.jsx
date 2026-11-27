@@ -6,7 +6,7 @@ import React, {
   useState,
 } from "react";
 import { createClient } from "@supabase/supabase-js";
-import { useDispatch, useSelector } from "react-redux";
+import { useDispatch, useSelector, shallowEqual } from "react-redux";
 import {
   bootstrap,
   fetchStats,
@@ -818,7 +818,7 @@ export default function App() {
   const dispatch = useDispatch();
   const storeError = useSelector((s) => s.data.error);
   const companies = useSelector((s) => s.data.lists.Companies.items);
-  const list = useSelector((s) => s.data.lists[page]);
+  const list = useSelector((s) => s.data.lists[page], shallowEqual);
   const dataItems =
     useSelector((s) => s.data.lists[dataPage]?.items) || EMPTY_ROWS;
   const filters = useSelector((s) => s.data.filters[page]) || EMPTY_FILTERS;
@@ -1445,14 +1445,18 @@ export default function App() {
     const q = search.trim().toLowerCase();
 
     let out = rows.filter((record) => {
-      if (
-        q &&
-        !`${JSON.stringify(record)} ${companyMap[record.company_id] || ""}`
-          .toLowerCase()
-          .includes(q)
-      ) {
-        return false;
-      }
+      // PERFORMANCE FIX: Pre-computed search string instead of JSON.stringify
+      const searchStr = [
+        record.id,
+        record.voucher_no || "",
+        record.vehicle_number || "",
+        companyMap[record.company_id] || "",
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      if (q && !searchStr.includes(q)) return false;
 
       if (!dateKey) return true;
 
@@ -1593,12 +1597,20 @@ export default function App() {
     sSort,
   ]);
 
+  const rentMatching = useMemo(() => {
+    const { rentByPurchase, linked } = matchRents(
+      rentsList.items,
+      purchasesList.items,
+    );
+    return { rentByPurchase, linked };
+  }, [rentsList.items, purchasesList.items]);
+
   // ===================================================
   // 10c. VEHICLE TRACKING (purchase → sale, matched by vehicle)
   // ===================================================
 
   const tracking = useMemo(() => {
-    const { rentByPurchase } = matchRents(rentsList.items, purchasesList.items);
+    const { rentByPurchase } = rentMatching;
 
     // Same vehicle + same date + same company = ONE load, even when it was
     // billed in parts (different quantity / rate). Show it as one row with the
@@ -1845,6 +1857,7 @@ export default function App() {
     tMismatch,
     tSort,
     search,
+    rentMatching,
   ]);
 
   const trackFiltered = Boolean(
@@ -1857,7 +1870,7 @@ export default function App() {
   // ===================================================
 
   const tripsView = useMemo(() => {
-    const { rentByPurchase } = matchRents(rentsList.items, purchasesList.items);
+    const { rentByPurchase, linked } = rentMatching;
     const round3 = (n) => Math.round(n * 1000) / 1000;
 
     // same vehicle + same date + same company = ONE load (billed in parts)
@@ -2065,6 +2078,7 @@ export default function App() {
     vPay,
     vSort,
     search,
+    rentMatching,
   ]);
 
   const tripsFiltered = Boolean(
@@ -2076,7 +2090,7 @@ export default function App() {
   // ===================================================
 
   const rentView = useMemo(() => {
-    const { linked } = matchRents(rentsList.items, purchasesList.items);
+    const { linked } = rentMatching;
     const q = search.trim().toLowerCase();
     const rentGet = {
       entry_date: (r) => dayOf(r.entry_date),
@@ -2155,6 +2169,7 @@ export default function App() {
     rStatus,
     rSort,
     search,
+    rentMatching,
   ]);
 
   const rentFiltered = Boolean(

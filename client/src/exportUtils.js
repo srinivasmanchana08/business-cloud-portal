@@ -36,7 +36,7 @@ function fileName(spec, ext) {
 
 // PDF fonts cannot draw the rupee sign, so PDF uses "Rs."
 function pdfText(value, kind) {
-  if (value === null || value === undefined || value === "") return "—";
+  if (value === null || value === undefined || value === "") return "-";
   if (typeof value !== "number") return String(value);
   if (kind === "money") {
     return value < 0
@@ -124,7 +124,13 @@ export async function exportExcel(spec) {
   });
 
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, title.slice(0, 31));
+  // Excel sheet names: max 31 characters and none of  \ / ? * [ ] :
+  const sheetName =
+    String(title)
+      .replace(/[\\/?*[\]:]/g, " ")
+      .trim()
+      .slice(0, 31) || "Sheet1";
+  XLSX.utils.book_append_sheet(wb, ws, sheetName);
   XLSX.writeFile(wb, fileName(spec, "xlsx"));
 }
 
@@ -187,7 +193,7 @@ export async function exportPdf(spec) {
 
   // ---- summary: labels across the top, values underneath (column wise)
   if (summary?.length) {
-    let y = (doc.lastAutoTable?.finalY || 72) + 22;
+    let y = (doc.lastAutoTable?.finalY ?? 72) + 22;
     if (y > pageH - 110) {
       doc.addPage();
       y = 50;

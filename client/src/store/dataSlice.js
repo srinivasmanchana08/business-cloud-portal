@@ -240,6 +240,9 @@ const dataSlice = createSlice({
   extraReducers: (builder) => {
     builder
       // ---- first load: fill the whole cache at once
+      .addCase(bootstrap.rejected, (state, action) => {
+        state.error = action.error.message || "Could not load data.";
+      })
       .addCase(bootstrap.fulfilled, (state, { payload }) => {
         const now = Date.now();
         const fill = (list, items) => {
@@ -261,7 +264,8 @@ const dataSlice = createSlice({
         Object.entries(payload.data).forEach(([business, lists]) => {
           Object.entries(lists).forEach(([key, items]) => {
             const page = key[0].toUpperCase() + key.slice(1); // "sales" -> "Sales"
-            fill(holder(state, page, business).lists[page], items);
+            const list = holder(state, page, business).lists[page];
+            if (list) fill(list, items);
           });
         });
       })
@@ -312,8 +316,10 @@ const dataSlice = createSlice({
       .addCase(deleteRecord.pending, (state, action) => {
         const { page, id, business } = action.meta.arg;
         const list = holder(state, page, business).lists[page];
-        list.backup = list.items;
-        list.items = list.items.filter((item) => item.id !== id);
+        if (!list.backup) list.backup = list.items;
+        list.items = list.items.filter(
+          (item) => String(item.id) !== String(id),
+        );
       })
       .addCase(deleteRecord.fulfilled, (state, action) => {
         const { page, business } = action.meta.arg;
@@ -324,6 +330,7 @@ const dataSlice = createSlice({
         const list = holder(state, page, business).lists[page];
         if (list.backup) list.items = list.backup;
         list.backup = null;
+        state.error = action.error.message || "Could not delete the record.";
       });
   },
 });

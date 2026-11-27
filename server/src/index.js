@@ -490,8 +490,15 @@ for (const [key, config] of Object.entries(resources)) {
       // Never trust owner_id supplied by the frontend.
       payload.owner_id = req.user.id;
 
+      // Records that belong to one business must say which one.
       if (config.scoped) {
-        const business = req.body?.business || "DDGS";
+        const business = req.body?.business;
+
+        if (!business) {
+          return res.status(400).json({
+            error: "Business is required for this record type",
+          });
+        }
 
         if (!BUSINESSES.includes(business)) {
           return res.status(400).json({ error: "Unknown business" });
